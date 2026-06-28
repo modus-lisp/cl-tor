@@ -8,7 +8,7 @@
   (:use #:cl)
   (:export
    #:octets #:bytes->hex #:hex->bytes #:ascii->bytes #:cat #:base64-decode
-   #:u8 #:u16be #:u32be #:put-u8 #:put-u16be #:put-u32be
+   #:u8 #:u16be #:u32be #:put-u8 #:put-u16be #:put-u32be #:ipv4->bytes
    #:read-u16be #:read-u32be #:subv #:bytes=))
 
 (defpackage #:cl-tor.crypto
@@ -64,3 +64,22 @@
    #:link-relay #:link-version #:link-circid-len #:link-stream
    #:link-validated #:link-my-apparent-addr
    #:send-cell #:recv-cell))
+
+(defpackage #:cl-tor.relay-crypto
+  (:use #:cl)
+  (:local-nicknames (#:u #:cl-tor.util) (#:c #:cl-tor.crypto) (#:n #:cl-tor.ntor))
+  (:export
+   #:hop #:make-hop #:hop-relay #:hop-kf #:hop-kb #:hop-df #:hop-db
+   #:build-relay-body #:parse-relay-body #:recognized-and-valid
+   #:+r-begin+ #:+r-data+ #:+r-end+ #:+r-connected+ #:+r-sendme+
+   #:+r-extend2+ #:+r-extended2+ #:+r-drop+ #:+r-resolve+ #:+r-resolved+))
+
+(defpackage #:cl-tor.circuit
+  (:use #:cl)
+  (:local-nicknames (#:u #:cl-tor.util) (#:c #:cl-tor.crypto) (#:n #:cl-tor.ntor)
+                    (#:cell #:cl-tor.cell) (#:link #:cl-tor.link)
+                    (#:dir #:cl-tor.directory) (#:rc #:cl-tor.relay-crypto))
+  (:export
+   #:circuit #:circuit-link #:circuit-id #:circuit-hops #:circuit-length
+   #:create-circuit #:extend-circuit #:build-circuit
+   #:send-relay #:recv-relay #:destroy-circuit))

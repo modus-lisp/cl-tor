@@ -74,6 +74,14 @@
   (dotimes (i 4) (setf (aref vec (+ pos i)) (ldb (byte 8 (* 8 (- 3 i))) n)))
   (+ pos 4))
 
+(defun ipv4->bytes (dotted)
+  "Dotted-quad string -> 4 bytes."
+  (let ((b (octets 4)) (i 0) (start 0))
+    (loop for pos = (position #\. dotted :start start)
+          do (setf (aref b i) (parse-integer dotted :start start :end pos))
+             (incf i)
+             (if pos (setf start (1+ pos)) (return b)))))
+
 (defun read-u16be (vec pos) (logior (ash (aref vec pos) 8) (aref vec (1+ pos))))
 (defun read-u32be (vec pos)
   (let ((n 0)) (dotimes (i 4 n) (setf n (logior (ash n 8) (aref vec (+ pos i)))))))

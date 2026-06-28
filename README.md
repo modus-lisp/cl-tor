@@ -25,11 +25,20 @@ anonymity is a correctness property a young implementation cannot guarantee — 
 
 - **Crypto suite** ✅ — SHA-1/256/3, HMAC-SHA256, HKDF, AES-128-CTR, X25519,
   Ed25519, over `ironclad`. Verified: X25519 vs **RFC 7748**, HKDF vs **RFC 5869**.
-- **ntor handshake** ✅ — `ntor-curve25519-sha256-1` (CREATE2/EXTEND2 key
-  exchange): client + server sides, KEY_SEED/AUTH, and HKDF expansion to the four
-  per-hop relay keys (Df/Db/Kf/Kb). Verified by full client↔server key agreement
-  (both derive identical keys; client accepts a valid AUTH and rejects a tampered
-  one / mis-addressed onion-skin).
+- **ntor handshake** ✅ — `ntor-curve25519-sha256-1`: client + server, KEY_SEED/
+  AUTH, HKDF expansion to the per-hop keys (Df/Db/Kf/Kb). Full client↔server
+  key agreement + AUTH accept/reject.
+- **Directory bootstrap** ✅ — fetch + inflate the microdesc consensus from
+  hardcoded authorities; parse relays (identity/addr/flags/bw/md-digest); fetch
+  microdescriptors (ntor key + Ed25519 id); flag-filtered path selection.
+  *Live: parses ~9500 relays.*
+- **Link handshake** ✅ — TLS to a relay ORPort; VERSIONS negotiation; CERTS/
+  NETINFO; Ed25519 cert chain validated and bound to the TLS cert + consensus
+  identity. *Live: completes a v5 handshake with a real guard, validated.*
+- **Circuits** ✅ — CREATE2 + EXTEND2 with per-hop AES-128-CTR + SHA-1 onion
+  crypto (recognized/digest). *Live: builds real 3-hop circuits on the Tor
+  network — the unforgeable ntor KAT.*
+- **Streams + SOCKS5** ⏳ — next.
 
 ## Roadmap
 
@@ -38,13 +47,8 @@ The protocol is built bottom-up; each phase is independently testable, and the
 is byte-exact).
 
 1. **Crypto + ntor** ✅ — *done, vector-verified.*
-2. **Cells + link handshake** — fixed/variable cell framing; TLS to a relay
-   ORPort (`cl+ssl`, certs validated via the in-protocol CERTS cell, not a CA);
-   VERSIONS/CERTS/AUTH_CHALLENGE/NETINFO. *Milestone: complete a v4 link handshake
-   with a real relay.*
-3. **Circuits** — CREATE2/CREATED2 (ntor) to a guard; EXTEND2/EXTENDED2 over
-   RELAY_EARLY to a 3-hop circuit; per-hop AES-CTR + SHA-1 onion crypto.
-   *Milestone: build a real 3-hop circuit on the live network — the ntor KAT.*
+2. **Cells + link handshake** ✅ — *done, live-validated.*
+3. **Circuits** ✅ — *done; builds real 3-hop circuits on the live network.*
 4. **Directory** — hardcoded authorities/fallbacks; fetch + parse the microdesc
    consensus and microdescriptors (ntor keys); consensus signature validation;
    bandwidth-weighted guard/middle/exit selection.

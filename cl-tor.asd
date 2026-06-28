@@ -23,7 +23,9 @@
      (:file "ntor")       ; ntor-curve25519-sha256-1 circuit handshake + key derivation
      (:file "directory")  ; minimal directory bootstrap: consensus + microdescs + selection
      (:file "cell")       ; cell framing (fixed + variable)
-     (:file "link"))))    ; TLS link handshake: VERSIONS/CERTS/NETINFO + cert validation
+     (:file "link")       ; TLS link handshake: VERSIONS/CERTS/NETINFO + cert validation
+     (:file "relay-crypto") ; per-hop onion crypto (AES-CTR layers + SHA-1 digests)
+     (:file "circuit")))) ; CREATE2 + EXTEND2 circuit construction; relay cell send/recv
   :in-order-to ((test-op (test-op "cl-tor/test"))))
 
 (defsystem "cl-tor/test"
