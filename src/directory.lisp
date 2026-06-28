@@ -288,8 +288,17 @@ nil) and parse it into RELAY structs."
             when (> acc pick) return r
             finally (return (car (last relays)))))))
 
+(defun %net16 (relay)
+  "The /16 (first two octets) of RELAY's IPv4 address, as a string."
+  (let* ((ip (relay-ip relay)) (d1 (position #\. ip)))
+    (subseq ip 0 (position #\. ip :start (1+ d1)))))
+
 (defun %distinct (relay &rest others)
-  (notany (lambda (o) (and o (string= (relay-nickname relay) (relay-nickname o)))) others))
+  "T iff RELAY shares neither a nickname nor a /16 with any of OTHERS — a basic
+path constraint so no two hops sit in the same nickname or subnet."
+  (notany (lambda (o) (and o (or (string= (relay-nickname relay) (relay-nickname o))
+                                 (string= (%net16 relay) (%net16 o)))))
+          others))
 
 (defun pick-relay (&key (flag "Fast") relays)
   "Pick one running relay carrying FLAG (bandwidth-weighted) and enrich it."
@@ -297,11 +306,12 @@ nil) and parse it into RELAY structs."
          (cands (%candidates relays flag)))
     (when cands (enrich-relay (%weighted-choice cands)))))
 
-(defun pick-path (&optional relays &key (port 443))
-  "Pick an enriched (guard middle exit) path: bandwidth-weighted, distinct, with
-an exit whose policy permits PORT."
+(defun pick-path (&optional relays &key (port 443) guard)
+  "Pick an enriched (guard middle exit) path: bandwidth-weighted, distinct (no
+shared nickname or /16), with an exit whose policy permits PORT.  A GUARD may be
+supplied (for persistence) instead of being chosen."
   (let* ((relays (or relays (consensus-relays)))
-         (guard (enrich-relay (%weighted-choice (%candidates relays "Guard"))))
+         (guard (or guard (enrich-relay (%weighted-choice (%candidates relays "Guard")))))
          (exits (%candidates relays "Exit"))
          (exit (loop for tries from 1 to 15
                      for e = (%weighted-choice exits)

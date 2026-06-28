@@ -41,10 +41,15 @@ No warranty (see [LICENSE](LICENSE)).
 - **Circuits** ✅ — CREATE2 + EXTEND2 with per-hop AES-128-CTR + SHA-1 onion
   crypto (recognized/digest). *Live: builds real 3-hop circuits on the Tor
   network — the unforgeable ntor KAT.*
-- **Streams + SOCKS5** ✅ — RELAY_BEGIN/DATA/END streams; a local SOCKS5 proxy
-  (host names resolved at the exit — no DNS leak). *Live: `curl` through it and
-  the Tor Project's own check service reports `{"IsTor":true}`.* SENDME flow
-  control is still TODO, so a single stream is bounded to ~500 KB (see P6).
+- **Streams + SOCKS5** ✅ — RELAY_BEGIN/DATA/END streams with **SENDME flow
+  control** (authenticated v1 circuit + stream); a local SOCKS5 proxy (host names
+  resolved at the exit — no DNS leak), full-duplex over a dedicated reader thread.
+  *Live: `curl` through it reports `{"IsTor":true}`; 10 MB downloads complete and
+  the daemon stays up.*
+- **Hardening** ✅ (partial) — entry-guard **persistence** (one stable guard,
+  saved to `~/.cl-tor/guard`); **path constraints** (no two hops share a nickname
+  or /16); TLS 1.2 link pinning; crash-safe daemon. *Remaining: RSA cross-cert
+  checks in the link CERTS cell, and relay-family path constraints.*
 
 ## Roadmap
 
@@ -58,6 +63,8 @@ is byte-exact).
 4. **Directory** ✅ — *done; consensus signatures validated, bandwidth-weighted
    exit-policy-aware selection.*
 5. **Streams + SOCKS5** ✅ — *done; `curl` through it reports Tor is in use.*
+6. **Hardening** — SENDME, guard persistence, /16 path constraints, TLS-1.2
+   pinning, crash-safety ✅ done; RSA cross-cert + relay-family constraints remain.
 
 ## Layout
 
