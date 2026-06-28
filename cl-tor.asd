@@ -8,8 +8,9 @@
   :author "ynniv"
   :license "MIT"
   :depends-on ("ironclad"            ; crypto primitives (SHA-1/256, HMAC, AES-CTR, X25519, Ed25519, RSA)
-               "usocket"             ; TCP to relay ORPorts
+               "usocket"             ; TCP to relay ORPorts + directory HTTP
                "cl+ssl"              ; the TLS link layer
+               "chipz"               ; zlib inflate (directory documents are compressed)
                "bordeaux-threads")   ; per-circuit read loops
   :serial t
   :components
@@ -19,7 +20,8 @@
     ((:file "packages")   ; package layout
      (:file "util")       ; hex, byte ops, big/little-endian framing
      (:file "crypto")     ; thin wrappers over ironclad (the cipher suite Tor uses)
-     (:file "ntor"))))   ; ntor-curve25519-sha256-1 circuit handshake + key derivation
+     (:file "ntor")       ; ntor-curve25519-sha256-1 circuit handshake + key derivation
+     (:file "directory")))) ; minimal directory bootstrap: consensus + microdescs + selection
   :in-order-to ((test-op (test-op "cl-tor/test"))))
 
 (defsystem "cl-tor/test"

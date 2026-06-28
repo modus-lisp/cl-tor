@@ -40,6 +40,24 @@
 (defun ascii->bytes (string)
   (map '(simple-array (unsigned-byte 8) (*)) #'char-code string))
 
+;;; ---- base64 (standard alphabet, padding optional) -----------------------
+;;; Tor directory documents use unpadded standard base64 for keys and digests.
+
+(defparameter +b64-alphabet+
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+
+(defun base64-decode (string)
+  "Decode standard base64 STRING (padding and embedded whitespace optional)."
+  (let ((acc 0) (bits 0) (out (make-array 0 :element-type '(unsigned-byte 8)
+                                            :adjustable t :fill-pointer 0)))
+    (loop for ch across string
+          for v = (position ch +b64-alphabet+)
+          when v do (setf acc (logior (ash acc 6) v) bits (+ bits 6))
+                    (when (>= bits 8)
+                      (decf bits 8)
+                      (vector-push-extend (logand (ash acc (- bits)) #xff) out)))
+    (coerce out '(simple-array (unsigned-byte 8) (*)))))
+
 ;;; ---- big-endian integer framing (Tor cells are big-endian) --------------
 
 (defun u8  (n) (octets 1 :initial-element (logand n #xff)))

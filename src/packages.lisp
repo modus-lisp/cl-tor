@@ -7,7 +7,7 @@
 (defpackage #:cl-tor.util
   (:use #:cl)
   (:export
-   #:octets #:bytes->hex #:hex->bytes #:ascii->bytes #:cat
+   #:octets #:bytes->hex #:hex->bytes #:ascii->bytes #:cat #:base64-decode
    #:u8 #:u16be #:u32be #:put-u8 #:put-u16be #:put-u32be
    #:read-u16be #:read-u32be #:subv #:bytes=))
 
@@ -32,3 +32,14 @@
    #:server-handshake                ; for tests / running as a relay
    #:circuit-keys #:circuit-keys-df #:circuit-keys-db
    #:circuit-keys-kf #:circuit-keys-kb #:keys-from-seed))
+
+(defpackage #:cl-tor.directory
+  (:use #:cl)
+  (:local-nicknames (#:u #:cl-tor.util))
+  (:export
+   #:*authorities* #:http-get #:fetch-consensus #:parse-consensus
+   #:fetch-microdesc #:enrich-relay
+   #:relay #:relay-nickname #:relay-rsa-id #:relay-ip #:relay-or-port
+   #:relay-flags #:relay-bandwidth #:relay-md-digest
+   #:relay-ntor-key #:relay-ed-id #:relay-has-flag
+   #:consensus-relays #:pick-relay #:pick-path))

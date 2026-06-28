@@ -8,7 +8,8 @@
 
 (defpackage #:cl-tor.test
   (:use #:cl)
-  (:local-nicknames (#:u #:cl-tor.util) (#:c #:cl-tor.crypto) (#:n #:cl-tor.ntor))
+  (:local-nicknames (#:u #:cl-tor.util) (#:c #:cl-tor.crypto) (#:n #:cl-tor.ntor)
+                    (#:d #:cl-tor.directory))
   (:export #:run))
 
 (in-package #:cl-tor.test)
@@ -79,13 +80,46 @@
     (check-true "encrypt then decrypt round-trips" (equalp pt d))
     (check-true "ciphertext differs from plaintext" (not (equalp pt e)))))
 
+(defun test-base64 ()
+  (format t "~%base64 (RFC-4648 vectors, padded + unpadded):~%")
+  (flet ((dec (s) (map 'string #'code-char (u:base64-decode s))))
+    (check "Zm9vYmFy"  (dec "Zm9vYmFy") "foobar" :test #'string=)
+    (check "Zm9vYmE="  (dec "Zm9vYmE=") "fooba" :test #'string=)
+    (check "Zg (unpadded)" (dec "Zg") "f" :test #'string=)
+    (check "20-byte id len" (length (u:base64-decode "AAAErLudKby6FyVrs1ko3b/Iq6k")) 20 :test #'=)))
+
+(defparameter +sample-consensus+
+  (format nil "network-status-version 3 microdesc~%~
+r alpha AAAErLudKby6FyVrs1ko3b/Iq6k 2038-01-01 00:00:00 152.53.144.50 8443 0~%~
+m MZjFbMLLC+a+LTqejOFlnJWdO6bIPXr0vWWPZQQVihY~%~
+s Fast Guard Running Stable V2Dir Valid~%~
+w Bandwidth=59000~%~
+r beta AAB3U5aCNzT5U9IsI48P6F2285A 2038-01-01 00:00:00 188.195.48.170 9001 0~%~
+m KoMvR0kTFTMsDDrYnH+OlkJKovaGYnJrwBqhlI6YlSs~%~
+s Exit Fast Running Stable Valid~%~
+w Bandwidth=600~%"))
+
+(defun test-consensus-parse ()
+  (format t "~%consensus parsing (fixed snippet):~%")
+  (let* ((relays (d:parse-consensus +sample-consensus+))
+         (a (first relays)) (b (second relays)))
+    (check "relay count" (length relays) 2 :test #'=)
+    (check "nickname" (d:relay-nickname a) "alpha" :test #'string=)
+    (check "ip/port" (list (d:relay-ip a) (d:relay-or-port a)) '("152.53.144.50" 8443))
+    (check "rsa-id is 20 bytes" (length (d:relay-rsa-id a)) 20 :test #'=)
+    (check "flags" (d:relay-has-flag a "Guard") t :test (lambda (x y) (eq (and x t) y)))
+    (check "bandwidth" (d:relay-bandwidth a) 59000 :test #'=)
+    (check "md-digest" (d:relay-md-digest b) "KoMvR0kTFTMsDDrYnH+OlkJKovaGYnJrwBqhlI6YlSs" :test #'string=)))
+
 (defun run ()
   (setf *pass* 0 *fail* 0)
-  (format t "~&=== cl-tor offline gate (crypto + ntor) ===~%")
+  (format t "~&=== cl-tor offline gate (crypto + ntor + directory) ===~%")
   (test-x25519)
   (test-hkdf)
   (test-ntor)
   (test-aes-ctr)
+  (test-base64)
+  (test-consensus-parse)
   (format t "~%=== ~d passed, ~d failed ===~%" *pass* *fail*)
   (when (plusp *fail*) (error "cl-tor offline gate: ~d failures" *fail*))
   t)
