@@ -21,7 +21,9 @@
      (:file "util")       ; hex, byte ops, big/little-endian framing
      (:file "crypto")     ; thin wrappers over ironclad (the cipher suite Tor uses)
      (:file "ntor")       ; ntor-curve25519-sha256-1 circuit handshake + key derivation
-     (:file "directory")))) ; minimal directory bootstrap: consensus + microdescs + selection
+     (:file "directory")  ; minimal directory bootstrap: consensus + microdescs + selection
+     (:file "cell")       ; cell framing (fixed + variable)
+     (:file "link"))))    ; TLS link handshake: VERSIONS/CERTS/NETINFO + cert validation
   :in-order-to ((test-op (test-op "cl-tor/test"))))
 
 (defsystem "cl-tor/test"

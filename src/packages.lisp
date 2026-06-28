@@ -43,3 +43,24 @@
    #:relay-flags #:relay-bandwidth #:relay-md-digest
    #:relay-ntor-key #:relay-ed-id #:relay-has-flag
    #:consensus-relays #:pick-relay #:pick-path))
+
+(defpackage #:cl-tor.cell
+  (:use #:cl)
+  (:local-nicknames (#:u #:cl-tor.util))
+  (:export
+   #:+versions+ #:+certs+ #:+auth-challenge+ #:+netinfo+ #:+create2+ #:+created2+
+   #:+relay+ #:+relay-early+ #:+destroy+ #:+padding+ #:+vpadding+
+   #:+payload-len+ #:variable-cell-p
+   #:read-cell #:write-cell #:read-bytes))
+
+(defpackage #:cl-tor.link
+  (:use #:cl)
+  (:local-nicknames (#:u #:cl-tor.util)
+                    (#:c #:cl-tor.crypto)
+                    (#:cell #:cl-tor.cell)
+                    (#:dir #:cl-tor.directory))
+  (:export
+   #:link #:connect-link #:close-link
+   #:link-relay #:link-version #:link-circid-len #:link-stream
+   #:link-validated #:link-my-apparent-addr
+   #:send-cell #:recv-cell))
