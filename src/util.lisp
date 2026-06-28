@@ -82,6 +82,17 @@
              (incf i)
              (if pos (setf start (1+ pos)) (return b)))))
 
+(defun bytes->int (bytes)
+  "Big-endian byte sequence -> integer."
+  (let ((n 0)) (loop for b across bytes do (setf n (logior (ash n 8) b))) n))
+
+(defun int->bytes (n length)
+  "Integer -> big-endian byte vector, left-zero-padded to LENGTH."
+  (let ((b (octets length)))
+    (loop for i from (1- length) downto 0
+          do (setf (aref b i) (logand n #xff) n (ash n -8)))
+    b))
+
 (defun read-u16be (vec pos) (logior (ash (aref vec pos) 8) (aref vec (1+ pos))))
 (defun read-u32be (vec pos)
   (let ((n 0)) (dotimes (i 4 n) (setf n (logior (ash n 8) (aref vec (+ pos i)))))))

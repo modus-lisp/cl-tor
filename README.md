@@ -15,11 +15,12 @@ layer against official vectors, then validate against the live network.
 
 ## ⚠️ Status & disclaimer
 
-**Early — foundation only.** The crypto suite and the ntor circuit handshake are
-implemented and vector-verified; the link/circuit/directory/stream layers are not
-built yet (see the roadmap). This is **research / educational software**, and
-anonymity is a correctness property a young implementation cannot guarantee — do
-**not** rely on it to protect anyone. No warranty (see [LICENSE](LICENSE)).
+**Functional, but research/educational — do not rely on it for anonymity.**
+End to end it builds validated circuits and proxies traffic, but it is a young
+clean-room implementation still missing safety-relevant pieces (SENDME flow
+control, RSA cross-cert checks in CERTS, guard persistence, path constraints —
+see P6), and anonymity is a correctness property such code can't yet guarantee.
+No warranty (see [LICENSE](LICENSE)).
 
 ## Status
 
@@ -28,10 +29,12 @@ anonymity is a correctness property a young implementation cannot guarantee — 
 - **ntor handshake** ✅ — `ntor-curve25519-sha256-1`: client + server, KEY_SEED/
   AUTH, HKDF expansion to the per-hop keys (Df/Db/Kf/Kb). Full client↔server
   key agreement + AUTH accept/reject.
-- **Directory bootstrap** ✅ — fetch + inflate the microdesc consensus from
-  hardcoded authorities; parse relays (identity/addr/flags/bw/md-digest); fetch
-  microdescriptors (ntor key + Ed25519 id); flag-filtered path selection.
-  *Live: parses ~9500 relays.*
+- **Directory** ✅ — fetch + inflate the microdesc consensus; **validate its
+  signatures** against the hardcoded authority v3 identities (from-scratch RSA:
+  modexp + DER + PKCS#1) requiring a majority quorum; parse relays + fetch
+  microdescriptors (ntor key, Ed25519 id, exit policy); **bandwidth-weighted,
+  exit-policy-aware** path selection. *Live: validates the real consensus
+  (≥5/9 sigs) and rejects a tampered one.*
 - **Link handshake** ✅ — TLS to a relay ORPort; VERSIONS negotiation; CERTS/
   NETINFO; Ed25519 cert chain validated and bound to the TLS cert + consensus
   identity. *Live: completes a v5 handshake with a real guard, validated.*
@@ -52,9 +55,8 @@ is byte-exact).
 1. **Crypto + ntor** ✅ — *done, vector-verified.*
 2. **Cells + link handshake** ✅ — *done, live-validated.*
 3. **Circuits** ✅ — *done; builds real 3-hop circuits on the live network.*
-4. **Directory** — a minimal fetch/parse/select is ✅ done (consensus +
-   microdescriptors + flag-filtered selection); still TODO: bandwidth-weighted
-   selection, exit-policy/port checks, and consensus *signature* validation.
+4. **Directory** ✅ — *done; consensus signatures validated, bandwidth-weighted
+   exit-policy-aware selection.*
 5. **Streams + SOCKS5** ✅ — *done; `curl` through it reports Tor is in use.*
 
 ## Layout

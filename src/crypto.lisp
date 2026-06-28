@@ -63,6 +63,55 @@ Returns a fresh byte vector."
     (ironclad:encrypt-in-place cipher buf)
     buf))
 
+;;; ---- RSA (directory / consensus signatures) -----------------------------
+;;; Implemented from scratch (modexp + DER parse + PKCS#1 v1.5 unpadding) so the
+;;; modus port doesn't need an RSA library; Tor's signatures pad the raw digest
+;;; with PKCS#1 v1.5 and no DigestInfo wrapper.
+
+(defun mod-expt (base exp modulus)
+  "Modular exponentiation BASE^EXP mod MODULUS (square-and-multiply)."
+  (let ((result 1) (b (mod base modulus)))
+    (loop while (plusp exp)
+          do (when (oddp exp) (setf result (mod (* result b) modulus)))
+             (setf exp (ash exp -1) b (mod (* b b) modulus)))
+    result))
+
+(defun %der-len (der pos)
+  "Read a DER length at POS -> (values length next-pos)."
+  (let ((b (aref der pos)))
+    (if (< b #x80)
+        (values b (1+ pos))
+        (let ((nbytes (- b #x80)) (len 0))
+          (dotimes (i nbytes) (setf len (logior (ash len 8) (aref der (+ pos 1 i)))))
+          (values len (+ pos 1 nbytes))))))
+
+(defun der-rsa-public-key (der)
+  "Parse a PKCS#1 RSAPublicKey DER (SEQUENCE{INTEGER n, INTEGER e}) -> (values n e)."
+  (assert (= (aref der 0) #x30))
+  (multiple-value-bind (seqlen p) (%der-len der 1)
+    (declare (ignore seqlen))
+    (assert (= (aref der p) #x02))
+    (multiple-value-bind (nlen p2) (%der-len der (1+ p))
+      (let ((n (u:bytes->int (u:subv der p2 (+ p2 nlen))))
+            (pe (+ p2 nlen)))
+        (assert (= (aref der pe) #x02))
+        (multiple-value-bind (elen p3) (%der-len der (1+ pe))
+          (values n (u:bytes->int (u:subv der p3 (+ p3 elen)))))))))
+
+(defun rsa-verify (n e signature expected-digest)
+  "T iff SIGNATURE (bytes) is a valid Tor RSA signature over EXPECTED-DIGEST:
+raw RSA (sig^e mod n), PKCS#1 v1.5 unpad (00 01 FF.. 00), tail == EXPECTED-DIGEST."
+  (handler-case
+      (let* ((klen (ceiling (integer-length n) 8))
+             (m (mod-expt (u:bytes->int signature) e n))
+             (mb (u:int->bytes m klen)))
+        (and (= (aref mb 0) 0) (= (aref mb 1) 1)
+             (let ((i 2))
+               (loop while (and (< i (length mb)) (= (aref mb i) #xff)) do (incf i))
+               (and (< i (length mb)) (= (aref mb i) 0)
+                    (u:bytes= (u:subv mb (1+ i)) expected-digest)))))
+    (error () nil)))
+
 ;;; ---- Ed25519 (cert validation) ------------------------------------------
 
 (defun ed25519-verify (public-key32 message sig64)

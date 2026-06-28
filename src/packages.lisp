@@ -9,7 +9,7 @@
   (:export
    #:octets #:bytes->hex #:hex->bytes #:ascii->bytes #:cat #:base64-decode
    #:u8 #:u16be #:u32be #:put-u8 #:put-u16be #:put-u32be #:ipv4->bytes
-   #:read-u16be #:read-u32be #:subv #:bytes=))
+   #:read-u16be #:read-u32be #:subv #:bytes= #:bytes->int #:int->bytes))
 
 (defpackage #:cl-tor.crypto
   (:use #:cl)
@@ -20,7 +20,8 @@
    #:hmac-sha256 #:hkdf-expand
    #:x25519 #:x25519-basepoint #:x25519-public #:gen-x25519
    #:aes128-ctr-cipher #:ctr-apply
-   #:ed25519-verify))
+   #:ed25519-verify
+   #:mod-expt #:der-rsa-public-key #:rsa-verify))
 
 (defpackage #:cl-tor.ntor
   (:use #:cl)
@@ -35,14 +36,15 @@
 
 (defpackage #:cl-tor.directory
   (:use #:cl)
-  (:local-nicknames (#:u #:cl-tor.util))
+  (:local-nicknames (#:u #:cl-tor.util) (#:c #:cl-tor.crypto))
   (:export
    #:*authorities* #:http-get #:fetch-consensus #:parse-consensus
    #:fetch-microdesc #:enrich-relay
    #:relay #:relay-nickname #:relay-rsa-id #:relay-ip #:relay-or-port
-   #:relay-flags #:relay-bandwidth #:relay-md-digest
+   #:relay-flags #:relay-bandwidth #:relay-md-digest #:relay-exit-ports
    #:relay-ntor-key #:relay-ed-id #:relay-has-flag
-   #:consensus-relays #:pick-relay #:pick-path))
+   #:consensus-relays #:pick-relay #:pick-path
+   #:*verify-consensus* #:validate-consensus #:fetch-certs #:exit-allows-port))
 
 (defpackage #:cl-tor.cell
   (:use #:cl)

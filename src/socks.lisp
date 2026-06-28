@@ -11,12 +11,12 @@
 
 (defvar *relays* nil "Cached consensus relay list (loaded on first use).")
 
-(defun build-fresh-circuit (&key (tries 6))
-  "Pick a path and build a 3-hop circuit, retrying past relay churn."
+(defun build-fresh-circuit (&key (tries 6) (port 443))
+  "Pick a path (exit permitting PORT) and build a 3-hop circuit, retrying churn."
   (unless *relays* (setf *relays* (dir:consensus-relays)))
   (loop for i from 1 to tries
         for circ = (ignore-errors
-                    (destructuring-bind (g m e) (dir:pick-path *relays*)
+                    (destructuring-bind (g m e) (dir:pick-path *relays* :port port)
                       (let ((lk (link:connect-link g)))
                         (handler-case (circ:build-circuit lk m e)
                           (error (err) (link:close-link lk) (error err))))))
@@ -101,7 +101,7 @@
              (let ((s (usocket:socket-stream app-sock)))
                (%socks-handshake s)
                (multiple-value-bind (host port) (%read-request s)
-                 (setf circ (build-fresh-circuit))
+                 (setf circ (build-fresh-circuit :port port))
                  (handler-case (strm:begin-stream circ host port)
                    (error () (%reply s 5) (return-from %handle)))   ; connection refused
                  (%reply s 0)
