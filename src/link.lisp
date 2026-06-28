@@ -80,9 +80,36 @@ extension (the signer), or NIL."
             (u:subv cert 0 (- (length cert) 64))
             (u:subv cert (- (length cert) 64) (length cert)))))
 
-(defun %validate-certs (certs tls-cert-sha256 expect-ed-id)
-  "Validate the Ed25519 link chain.  Returns the relay's Ed25519 identity on
-success, or signals an error."
+(defparameter +rsa-ed-crosscert-prefix+
+  (u:ascii->bytes "Tor TLS RSA/Ed25519 cross-certificate"))
+
+(defun %validate-rsa-crosscert (certs identity expect-rsa-id)
+  "Validate the RSA identity binding (cert-spec §2.3): cert 2 holds the RSA
+identity key (fingerprint must match the consensus rsa-id, exponent 65537);
+cert 7 is that RSA key signing the Ed25519 IDENTITY.  Signals on failure."
+  (let ((c2 (cdr (assoc 2 certs))) (c7 (cdr (assoc 7 certs))))
+    (unless (and c2 c7) (error "link: missing RSA certs (2/7)"))
+    (let ((rsa-der (c:x509-rsa-key c2)))
+      (when (and expect-rsa-id (not (u:bytes= (c:sha1 rsa-der) expect-rsa-id)))
+        (error "link: RSA identity does not match consensus fingerprint"))
+      (multiple-value-bind (n e) (c:der-rsa-public-key rsa-der)
+        (unless (= e 65537) (error "link: RSA identity exponent is not 65537"))
+        ;; cert 7: ED25519_KEY(32) EXPIRATION(4) SIGLEN(1) SIGNATURE
+        (let* ((ed-key (u:subv c7 0 32))
+               (expiration (u:subv c7 32 36))
+               (siglen (aref c7 36))
+               (sig (u:subv c7 37 (+ 37 siglen)))
+               (digest (c:sha256 (u:cat +rsa-ed-crosscert-prefix+ ed-key expiration))))
+          (unless (u:bytes= ed-key identity)
+            (error "link: cross-cert certifies a different Ed25519 identity"))
+          (unless (c:rsa-verify n e sig digest)
+            (error "link: RSA->Ed25519 cross-cert signature invalid")))))))
+
+(defun %validate-certs (certs tls-cert-sha256 expect-ed-id expect-rsa-id)
+  "Validate the relay's certificate chain: the Ed25519 link chain (cert 4
+identity->signing, cert 5 signing->TLS-cert) bound to the presented TLS cert and
+matched to the consensus Ed25519 id, plus the RSA identity cross-cert (certs 2/7)
+matched to the consensus RSA id.  Returns the Ed25519 identity, or signals."
   (let ((c4 (cdr (assoc 4 certs))) (c5 (cdr (assoc 5 certs))))
     (unless (and c4 c5) (error "link: missing Ed25519 certs (4/5)"))
     (multiple-value-bind (signing identity body4 sig4) (%parse-ed-cert c4)
@@ -97,6 +124,7 @@ success, or signals an error."
           (error "link: cert5 does not bind the presented TLS certificate"))
         (when (and expect-ed-id (not (u:bytes= identity expect-ed-id)))
           (error "link: relay Ed25519 identity does not match consensus"))
+        (%validate-rsa-crosscert certs identity expect-rsa-id)
         identity))))
 
 ;;; ---- NETINFO ------------------------------------------------------------
@@ -164,7 +192,8 @@ success, or signals an error."
                              (progn
                                (%validate-certs certs
                                                 (coerce fp '(simple-array (unsigned-byte 8) (*)))
-                                                (dir:relay-ed-id relay))
+                                                (dir:relay-ed-id relay)
+                                                (dir:relay-rsa-id relay))
                                t)
                            (error (e)
                              (when *debug-certs* (format *error-output* "~&[cert] ~a~%" e))

@@ -73,7 +73,8 @@
 ;;; ---- consensus ----------------------------------------------------------
 
 (defstruct relay
-  nickname rsa-id ip or-port (flags '()) (bandwidth 0) md-digest ntor-key ed-id exit-ports)
+  nickname rsa-id ip or-port (flags '()) (bandwidth 0) md-digest ntor-key ed-id exit-ports
+  (family '()) (family-ids '()))
 
 (defun relay-has-flag (relay flag) (member flag (relay-flags relay) :test #'string=))
 
@@ -242,27 +243,43 @@ nil) and parse it into RELAY structs."
                             (let ((n (parse-integer spec))) (cons n n))))))
 
 (defun fetch-microdesc (digest-b64 &key (authority (first *authorities*)))
-  "Fetch + parse one microdescriptor; returns (values ntor-key ed25519-id port-policy)."
+  "Fetch + parse one microdescriptor; returns (values ntor-key ed-id policy family family-ids)."
   (destructuring-bind (name host port &rest _) authority
     (declare (ignore name _))
     (let ((text (map 'string #'code-char
                      (http-get host port (format nil "/tor/micro/d/~a" digest-b64))))
-          ntor ed policy)
+          ntor ed policy family family-ids)
       (with-input-from-string (in text)
         (loop for line = (read-line in nil) while line do
           (let ((tk (%tokens line)))
             (cond ((string= (first tk) "ntor-onion-key") (setf ntor (u:base64-decode (second tk))))
                   ((and (string= (first tk) "id") (string= (second tk) "ed25519"))
                    (setf ed (u:base64-decode (third tk))))
-                  ((string= (first tk) "p") (setf policy (%parse-port-policy (rest tk))))))))
-      (values ntor ed policy))))
+                  ((string= (first tk) "p") (setf policy (%parse-port-policy (rest tk))))
+                  ((string= (first tk) "family")           ; legacy: list of $FINGERPRINTs
+                   (setf family (loop for f in (rest tk)
+                                      when (and (plusp (length f)) (char= (char f 0) #\$))
+                                        collect (string-upcase (subseq f 1)))))
+                  ((string= (first tk) "family-ids")        ; happy-families: shared ed25519 ids
+                   (setf family-ids (rest tk)))))))
+      (values ntor ed policy family family-ids))))
 
 (defun enrich-relay (relay &key (authority (first *authorities*)))
-  "Fill RELAY's ntor-key, ed-id, and exit-ports from its microdescriptor."
+  "Fill RELAY's ntor-key, ed-id, exit-ports, and family info from its microdescriptor."
   (when (relay-md-digest relay)
-    (multiple-value-bind (ntor ed policy) (fetch-microdesc (relay-md-digest relay) :authority authority)
-      (setf (relay-ntor-key relay) ntor (relay-ed-id relay) ed (relay-exit-ports relay) policy)))
+    (multiple-value-bind (ntor ed policy family family-ids)
+        (fetch-microdesc (relay-md-digest relay) :authority authority)
+      (setf (relay-ntor-key relay) ntor (relay-ed-id relay) ed (relay-exit-ports relay) policy
+            (relay-family relay) family (relay-family-ids relay) family-ids)))
   relay)
+
+(defun %same-family (a b)
+  "T iff relays A and B are in the same family: they share a family-id, or each
+legacy-lists the other (mutual)."
+  (flet ((fp (r) (string-upcase (u:bytes->hex (relay-rsa-id r)))))
+    (or (and (intersection (relay-family-ids a) (relay-family-ids b) :test #'string=) t)
+        (and (member (fp b) (relay-family a) :test #'string=)
+             (member (fp a) (relay-family b) :test #'string=) t))))
 
 (defun exit-allows-port (relay port)
   "T iff RELAY's exit port policy permits PORT."
@@ -313,15 +330,19 @@ supplied (for persistence) instead of being chosen."
   (let* ((relays (or relays (consensus-relays)))
          (guard (or guard (enrich-relay (%weighted-choice (%candidates relays "Guard")))))
          (exits (%candidates relays "Exit"))
-         (exit (loop for tries from 1 to 15
+         (exit (loop for tries from 1 to 20
                      for e = (%weighted-choice exits)
                      when (and e (%distinct e guard))
                        do (enrich-relay e)
-                          (when (exit-allows-port e port) (return e))
+                          (when (and (exit-allows-port e port) (not (%same-family e guard)))
+                            (return e))
                      finally (error "no exit permitting port ~d found" port)))
          (mids (%candidates relays "Fast"))
-         (middle (loop for tries from 1 to 25
+         (middle (loop for tries from 1 to 30
                        for m = (%weighted-choice mids)
-                       when (and m (%distinct m guard exit)) return (enrich-relay m)
+                       when (and m (%distinct m guard exit))
+                         do (enrich-relay m)
+                            (unless (or (%same-family m guard) (%same-family m exit))
+                              (return m))
                        finally (error "no middle relay found"))))
     (list guard middle exit)))

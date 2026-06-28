@@ -98,6 +98,23 @@ Returns a fresh byte vector."
         (multiple-value-bind (elen p3) (%der-len der (1+ pe))
           (values n (u:bytes->int (u:subv der p3 (+ p3 elen)))))))))
 
+(defparameter +rsa-encryption-oid+
+  (coerce #(#x06 #x09 #x2a #x86 #x48 #x86 #xf7 #x0d #x01 #x01 #x01)
+          '(simple-array (unsigned-byte 8) (*)))
+  "DER of the rsaEncryption OID (1.2.840.113549.1.1.1).")
+
+(defun x509-rsa-key (cert)
+  "Extract the PKCS#1 RSAPublicKey DER from an X.509 certificate's SubjectPublic
+KeyInfo (so its SHA-1 is the relay's RSA fingerprint, and it parses with
+DER-RSA-PUBLIC-KEY)."
+  (let ((p (search +rsa-encryption-oid+ cert)))
+    (unless p (error "x509: no rsaEncryption OID"))
+    (let ((q (+ p (length +rsa-encryption-oid+))))
+      (when (and (= (aref cert q) 5) (= (aref cert (1+ q)) 0)) (incf q 2))  ; NULL params
+      (unless (= (aref cert q) 3) (error "x509: expected BIT STRING"))      ; subjectPublicKey
+      (multiple-value-bind (blen p2) (%der-len cert (1+ q))
+        (u:subv cert (1+ p2) (+ p2 blen))))))    ; drop the unused-bits byte
+
 (defun rsa-verify (n e signature expected-digest)
   "T iff SIGNATURE (bytes) is a valid Tor RSA signature over EXPECTED-DIGEST:
 raw RSA (sig^e mod n), PKCS#1 v1.5 unpad (00 01 FF.. 00), tail == EXPECTED-DIGEST."

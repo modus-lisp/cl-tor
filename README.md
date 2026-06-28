@@ -16,11 +16,11 @@ layer against official vectors, then validate against the live network.
 ## ⚠️ Status & disclaimer
 
 **Functional, but research/educational — do not rely on it for anonymity.**
-End to end it builds validated circuits and proxies traffic, but it is a young
-clean-room implementation still missing safety-relevant pieces (SENDME flow
-control, RSA cross-cert checks in CERTS, guard persistence, path constraints —
-see P6), and anonymity is a correctness property such code can't yet guarantee.
-No warranty (see [LICENSE](LICENSE)).
+End to end it builds signature-validated circuits with a persistent guard, full
+link-cert validation, family/subnet path constraints, and flow control. But it
+is a young clean-room implementation that has not been audited or
+side-channel-hardened, and anonymity is a correctness property such code can't
+yet guarantee. No warranty (see [LICENSE](LICENSE)).
 
 ## Status
 
@@ -46,10 +46,11 @@ No warranty (see [LICENSE](LICENSE)).
   resolved at the exit — no DNS leak), full-duplex over a dedicated reader thread.
   *Live: `curl` through it reports `{"IsTor":true}`; 10 MB downloads complete and
   the daemon stays up.*
-- **Hardening** ✅ (partial) — entry-guard **persistence** (one stable guard,
-  saved to `~/.cl-tor/guard`); **path constraints** (no two hops share a nickname
-  or /16); TLS 1.2 link pinning; crash-safe daemon. *Remaining: RSA cross-cert
-  checks in the link CERTS cell, and relay-family path constraints.*
+- **Hardening** ✅ — entry-guard **persistence** (one stable guard, saved to
+  `~/.cl-tor/guard`); **path constraints** (no two hops share a nickname, /16, or
+  relay family); **RSA identity cross-cert** validation in the link CERTS cell
+  (certs 2/7, matched to the consensus RSA fingerprint); TLS 1.2 link pinning;
+  crash-safe daemon. *Live: real relays pass full cert validation.*
 
 ## Roadmap
 
@@ -63,8 +64,9 @@ is byte-exact).
 4. **Directory** ✅ — *done; consensus signatures validated, bandwidth-weighted
    exit-policy-aware selection.*
 5. **Streams + SOCKS5** ✅ — *done; `curl` through it reports Tor is in use.*
-6. **Hardening** — SENDME, guard persistence, /16 path constraints, TLS-1.2
-   pinning, crash-safety ✅ done; RSA cross-cert + relay-family constraints remain.
+6. **Hardening** ✅ — SENDME, guard persistence, path constraints (/16 +
+   nickname + family), RSA identity cross-cert validation, TLS-1.2 pinning,
+   crash-safety.
 
 ## Layout
 

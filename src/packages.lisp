@@ -21,7 +21,7 @@
    #:x25519 #:x25519-basepoint #:x25519-public #:gen-x25519
    #:aes128-ctr-cipher #:ctr-apply
    #:ed25519-verify
-   #:mod-expt #:der-rsa-public-key #:rsa-verify))
+   #:mod-expt #:der-rsa-public-key #:rsa-verify #:x509-rsa-key))
 
 (defpackage #:cl-tor.ntor
   (:use #:cl)
