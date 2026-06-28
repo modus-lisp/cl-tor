@@ -38,7 +38,10 @@ anonymity is a correctness property a young implementation cannot guarantee — 
 - **Circuits** ✅ — CREATE2 + EXTEND2 with per-hop AES-128-CTR + SHA-1 onion
   crypto (recognized/digest). *Live: builds real 3-hop circuits on the Tor
   network — the unforgeable ntor KAT.*
-- **Streams + SOCKS5** ⏳ — next.
+- **Streams + SOCKS5** ✅ — RELAY_BEGIN/DATA/END streams; a local SOCKS5 proxy
+  (host names resolved at the exit — no DNS leak). *Live: `curl` through it and
+  the Tor Project's own check service reports `{"IsTor":true}`.* SENDME flow
+  control is still TODO, so a single stream is bounded to ~500 KB (see P6).
 
 ## Roadmap
 
@@ -49,12 +52,10 @@ is byte-exact).
 1. **Crypto + ntor** ✅ — *done, vector-verified.*
 2. **Cells + link handshake** ✅ — *done, live-validated.*
 3. **Circuits** ✅ — *done; builds real 3-hop circuits on the live network.*
-4. **Directory** — hardcoded authorities/fallbacks; fetch + parse the microdesc
-   consensus and microdescriptors (ntor keys); consensus signature validation;
-   bandwidth-weighted guard/middle/exit selection.
-5. **Streams + SOCKS5** — RELAY_BEGIN/DATA/END/CONNECTED with SENDME flow
-   control; a local SOCKS5 server. *Milestone: `curl --socks5-hostname
-   127.0.0.1:9050 https://check.torproject.org` reports Tor is in use.*
+4. **Directory** — a minimal fetch/parse/select is ✅ done (consensus +
+   microdescriptors + flag-filtered selection); still TODO: bandwidth-weighted
+   selection, exit-policy/port checks, and consensus *signature* validation.
+5. **Streams + SOCKS5** ✅ — *done; `curl` through it reports Tor is in use.*
 
 ## Layout
 
@@ -81,8 +82,18 @@ re-pointing that one file at `net/crypto`.
 
 ```sh
 inspect/run-all.sh
-# === 14 passed, 0 failed ===
+# === 33 passed, 0 failed ===
 ```
+
+Run the proxy and route a request through Tor:
+
+```sh
+sbcl --load bin/cl-tor.lisp 9050        # SOCKS5 on 127.0.0.1:9050
+curl --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip
+# => {"IsTor":true,"IP":"185.220.101.22"}
+```
+
+Each connection builds its own fresh 3-hop circuit from the live consensus.
 
 ## License
 

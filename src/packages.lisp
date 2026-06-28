@@ -61,7 +61,7 @@
                     (#:dir #:cl-tor.directory))
   (:export
    #:link #:connect-link #:close-link
-   #:link-relay #:link-version #:link-circid-len #:link-stream
+   #:link-relay #:link-version #:link-circid-len #:link-stream #:link-sock
    #:link-validated #:link-my-apparent-addr
    #:send-cell #:recv-cell))
 
@@ -83,3 +83,16 @@
    #:circuit #:circuit-link #:circuit-id #:circuit-hops #:circuit-length
    #:create-circuit #:extend-circuit #:build-circuit
    #:send-relay #:recv-relay #:destroy-circuit))
+
+(defpackage #:cl-tor.stream
+  (:use #:cl)
+  (:local-nicknames (#:u #:cl-tor.util) (#:rc #:cl-tor.relay-crypto)
+                    (#:circ #:cl-tor.circuit))
+  (:export #:begin-stream #:send-stream-data #:end-stream))
+
+(defpackage #:cl-tor.socks
+  (:use #:cl)
+  (:local-nicknames (#:u #:cl-tor.util) (#:rc #:cl-tor.relay-crypto)
+                    (#:dir #:cl-tor.directory) (#:link #:cl-tor.link)
+                    (#:circ #:cl-tor.circuit) (#:strm #:cl-tor.stream))
+  (:export #:run-proxy #:build-fresh-circuit))
