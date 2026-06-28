@@ -20,7 +20,11 @@
 (defvar *debug-certs* nil "When true, print why cert validation failed.")
 
 (defstruct (link (:constructor %make-link))
-  relay sock stream version circid-len validated my-apparent-addr)
+  relay sock stream ctx version circid-len validated my-apparent-addr)
+
+(defconstant +tls1.2-version+ #x0303
+  "Pin Tor links to TLS 1.2: TLS 1.3 mid-stream KeyUpdate desyncs cl+ssl's
+gray-stream read path under load (decryption/bad-record-mac).")
 
 (defun send-cell (link cmd payload)
   (cell:write-cell (link-stream link) (link-circid-len link) 0 cmd payload))
@@ -31,6 +35,7 @@
 (defun close-link (link)
   (ignore-errors (close (link-stream link)))
   (ignore-errors (usocket:socket-close (link-sock link)))
+  (when (link-ctx link) (ignore-errors (cl+ssl:ssl-ctx-free (link-ctx link))))
   link)
 
 ;;; ---- VERSIONS -----------------------------------------------------------
@@ -120,9 +125,12 @@ success, or signals an error."
   (let* ((ip (dir:relay-ip relay)) (port (dir:relay-or-port relay))
          (sock (usocket:socket-connect ip port :element-type '(unsigned-byte 8)
                                                :timeout timeout))
-         (tls (cl+ssl:make-ssl-client-stream (usocket:socket-stream sock)
-                                             :verify nil :hostname ip))
-         (link (%make-link :relay relay :sock sock :stream tls :circid-len 2)))
+         (ctx (let ((c (cl+ssl:make-context :verify-mode cl+ssl:+ssl-verify-none+)))
+                (cl+ssl::ssl-ctx-set-max-proto-version c +tls1.2-version+) c))
+         (tls (cl+ssl:with-global-context (ctx :auto-free-p nil)
+                (cl+ssl:make-ssl-client-stream (usocket:socket-stream sock)
+                                               :verify nil :hostname ip)))
+         (link (%make-link :relay relay :sock sock :stream tls :ctx ctx :circid-len 2)))
     (handler-case
         (progn
           ;; 1. VERSIONS exchange (2-byte circ ids on these cells).

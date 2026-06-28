@@ -15,6 +15,16 @@
 
 (in-package #:cl-tor.socks)
 
+;; Never let a worker-thread condition drop into the debugger (no /dev/tty in a
+;; daemon — that's a fatal).  Log it and abort just that thread.
+(setf sb-ext:*invoke-debugger-hook*
+      (lambda (condition hook)
+        (declare (ignore hook))
+        (format *error-output* "~&[cl-tor] uncaught: ~a~%" condition)
+        (if (eq sb-thread:*current-thread* (sb-thread:main-thread))
+            (sb-ext:exit :code 1)
+            (sb-thread:abort-thread))))
+
 (let ((port (if (second sb-ext:*posix-argv*)
                 (parse-integer (second sb-ext:*posix-argv*))
                 9050)))

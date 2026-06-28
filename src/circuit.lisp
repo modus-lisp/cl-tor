@@ -8,10 +8,22 @@
 
 (in-package #:cl-tor.circuit)
 
-(defstruct (circuit (:constructor %make-circuit)) link id (hops '()))
+(defconstant +circ-start+ 1000)  (defconstant +circ-inc+ 100)
+(defconstant +stream-start+ 500) (defconstant +stream-inc+ 50)
+
+(defstruct (circuit (:constructor %make-circuit))
+  link id (hops '())
+  (deliver-window +circ-start+) (package-window +circ-start+)
+  (stream-windows (make-hash-table))            ; sid -> (deliver . package)
+  (write-lock (bt:make-lock "circuit-write")))  ; serialize sends (reader SENDME + writer data)
 
 (defun circuit-length (circ) (length (circuit-hops circ)))
 (defun %stream (circ) (link:link-stream (circuit-link circ)))
+
+(defun %stream-window (circ sid)
+  (or (gethash sid (circuit-stream-windows circ))
+      (setf (gethash sid (circuit-stream-windows circ))
+            (cons +stream-start+ +stream-start+))))
 
 ;;; ---- CREATE2 (first hop) ------------------------------------------------
 
@@ -41,17 +53,44 @@
 ;;; ---- relay cell send / recv ---------------------------------------------
 
 (defun send-relay (circ relay-cmd stream-id data &key early (target (1- (circuit-length circ))))
-  "Onion-encrypt a relay cell to hop TARGET and send it (RELAY_EARLY if EARLY)."
-  (let* ((hops (circuit-hops circ))
-         (body (rc:build-relay-body (nth target hops) relay-cmd stream-id data)))
-    (loop for i from target downto 0
-          do (setf body (c:ctr-apply (rc:hop-kf (nth i hops)) body)))
-    (cell:write-cell (%stream circ) 4 (circuit-id circ)
-                     (if early cell:+relay-early+ cell:+relay+) body)))
+  "Onion-encrypt a relay cell to hop TARGET and send it (RELAY_EARLY if EARLY).
+Serialized: the per-hop forward cipher/digest state and the wire write must not
+interleave between the reader's SENDMEs and the writer's data."
+  (bt:with-lock-held ((circuit-write-lock circ))
+    (let* ((hops (circuit-hops circ))
+           (body (rc:build-relay-body (nth target hops) relay-cmd stream-id data)))
+      (when (= relay-cmd rc:+r-data+)                    ; package-window accounting
+        (decf (circuit-package-window circ))
+        (decf (cdr (%stream-window circ stream-id))))
+      (loop for i from target downto 0
+            do (setf body (c:ctr-apply (rc:hop-kf (nth i hops)) body)))
+      (cell:write-cell (%stream circ) 4 (circuit-id circ)
+                       (if early cell:+relay-early+ cell:+relay+) body))))
+
+(defun %on-sendme (circ sid)
+  "Refill our package window when the far end grants more (cells swallowed)."
+  (if (zerop sid)
+      (incf (circuit-package-window circ) +circ-inc+)
+      (incf (cdr (%stream-window circ sid)) +stream-inc+)))
+
+(defun %on-data (circ hop-index sid)
+  "Deliver-window accounting; emit SENDMEs at the window boundaries.  The
+circuit-level SENDME is authenticated (v1) with the boundary cell's digest."
+  (decf (circuit-deliver-window circ))
+  (when (<= (circuit-deliver-window circ) (- +circ-start+ +circ-inc+))
+    (let ((digest (rc:hop-recv-digest (nth hop-index (circuit-hops circ)))))
+      (send-relay circ rc:+r-sendme+ 0 (u:cat (u:u8 1) (u:u16be 20) digest)))
+    (incf (circuit-deliver-window circ) +circ-inc+))
+  (let ((sw (%stream-window circ sid)))
+    (decf (car sw))
+    (when (<= (car sw) (- +stream-start+ +stream-inc+))
+      (send-relay circ rc:+r-sendme+ sid (u:octets 0))    ; stream SENDME is v0 (empty)
+      (incf (car sw) +stream-inc+))))
 
 (defun recv-relay (circ)
-  "Read cells until one decrypts to a recognized relay cell.  Returns
-(values hop-index relay-cmd stream-id length data).  Signals on DESTROY."
+  "Read cells until one decrypts to a recognized, deliverable relay cell.  Handles
+flow control internally (decrements deliver windows, emits SENDMEs, and swallows
+incoming SENDMEs).  Returns (values hop-index relay-cmd stream-id length data)."
   (let ((hops (circuit-hops circ)))
     (loop
       (multiple-value-bind (cid cmd payload) (cell:read-cell (%stream circ) 4)
@@ -60,15 +99,22 @@
           ((= cmd cell:+destroy+)
            (error "circuit destroyed by relay (reason ~d)" (aref payload 0)))
           ((or (= cmd cell:+relay+) (= cmd cell:+relay-early+))
-           (let ((body payload))
-             (loop for i from 0 below (length hops)
-                   do (setf body (c:ctr-apply (rc:hop-kb (nth i hops)) body))
-                      (when (rc:recognized-and-valid (nth i hops) body)
-                        (multiple-value-bind (rcmd recognized sid len rdata)
-                            (rc:parse-relay-body body)
-                          (declare (ignore recognized))
-                          (return-from recv-relay (values i rcmd sid len rdata)))))
-             (error "relay cell not recognized by any hop")))
+           (let ((body payload) (swallowed nil))
+             (block hops
+               (loop for i from 0 below (length hops)
+                     do (setf body (c:ctr-apply (rc:hop-kb (nth i hops)) body))
+                        (when (rc:recognized-and-valid (nth i hops) body)
+                          (multiple-value-bind (rcmd recognized sid len rdata)
+                              (rc:parse-relay-body body)
+                            (declare (ignore recognized))
+                            (cond
+                              ((= rcmd rc:+r-sendme+) (%on-sendme circ sid)
+                               (setf swallowed t) (return-from hops))
+                              ((= rcmd rc:+r-data+) (%on-data circ i sid)
+                               (return-from recv-relay (values i rcmd sid len rdata)))
+                              (t (return-from recv-relay (values i rcmd sid len rdata))))))
+                     finally (error "relay cell not recognized by any hop")))
+             (unless swallowed (error "recv-relay: internal"))))
           (t nil))))))                          ; ignore PADDING etc.
 
 ;;; ---- EXTEND2 (subsequent hops) ------------------------------------------

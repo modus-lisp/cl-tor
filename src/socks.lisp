@@ -64,33 +64,34 @@
                 do (vector-push (read-byte stream) buf))
           (coerce buf '(simple-array (unsigned-byte 8) (*)))))))
 
-(defun %tor-ready-p (tor-sock tor-stream)
-  (or (listen tor-stream)
-      (usocket:wait-for-input tor-sock :timeout 0 :ready-only t)))
-
 (defun %splice (app-sock circ sid)
+  "Full duplex: a dedicated thread pumps tor->app with blocking reads (no
+non-blocking TLS peeking, which corrupts cl+ssl under load); this thread pumps
+app->tor.  Circuit writes are serialized by the circuit's write-lock."
   (let* ((app (usocket:socket-stream app-sock))
-         (lk (circ:circuit-link circ))
-         (tor-sock (link:link-sock lk))
-         (tor-stream (link:link-stream lk)))
-    (block done
-      (loop
-        ;; tor -> app: drain every recognized cell currently available
-        (loop while (%tor-ready-p tor-sock tor-stream) do
-          (multiple-value-bind (hop rcmd rsid len data) (circ:recv-relay circ)
-            (declare (ignore hop rsid len))
-            (cond
-              ((= rcmd rc:+r-data+) (write-sequence data app) (force-output app))
-              ((= rcmd rc:+r-end+) (return-from done))
-              (t nil))))                    ; ignore SENDME etc.
-        ;; block until either side has something (or idle out)
-        (let ((ready (usocket:wait-for-input (list app-sock tor-sock)
-                                             :timeout 60 :ready-only t)))
-          (when (null ready) (return-from done))
-          (when (member app-sock ready)
-            (let ((chunk (%read-available app)))
-              (if (eq chunk :eof) (return-from done)
-                  (strm:send-stream-data circ sid chunk)))))))))
+         (reader (bt:make-thread
+                  (lambda ()
+                    (handler-case
+                        (loop
+                          (multiple-value-bind (hop rcmd rsid len data) (circ:recv-relay circ)
+                            (declare (ignore hop rsid len))
+                            (cond
+                              ((= rcmd rc:+r-data+) (write-sequence data app) (force-output app))
+                              ((= rcmd rc:+r-end+) (return)))))
+                      (serious-condition () nil))
+                    (ignore-errors (usocket:socket-close app-sock)))   ; unblock our app read
+                  :name "cl-tor tor->app")))
+    (unwind-protect
+         (handler-case
+             (loop for chunk = (%read-available app)
+                   until (eq chunk :eof)
+                   do (strm:send-stream-data circ sid chunk))
+           (serious-condition () nil))
+      ;; Unblock the reader by closing the underlying TCP socket — NOT the SSL
+      ;; object: freeing that while the reader is mid-SSL_read is a use-after-
+      ;; free (segfault).  Join the reader, then %handle frees the SSL stream.
+      (ignore-errors (usocket:socket-close (link:link-sock (circ:circuit-link circ))))
+      (ignore-errors (bt:join-thread reader)))))
 
 ;;; ---- server -------------------------------------------------------------
 
@@ -109,7 +110,7 @@
                          (mapcar (lambda (h) (dir:relay-nickname (rc:hop-relay h)))
                                  (circ:circuit-hops circ)))
                  (%splice app-sock circ 1)))
-           (error (e) (format t "[socks] error: ~a~%" e)))
+           (serious-condition (e) (format t "[socks] error: ~a~%" e)))
       (when circ (ignore-errors (strm:end-stream circ 1))
             (ignore-errors (circ:destroy-circuit circ))
             (ignore-errors (link:close-link (circ:circuit-link circ))))

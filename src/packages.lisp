@@ -72,7 +72,7 @@
   (:local-nicknames (#:u #:cl-tor.util) (#:c #:cl-tor.crypto) (#:n #:cl-tor.ntor))
   (:export
    #:hop #:make-hop #:hop-relay #:hop-kf #:hop-kb #:hop-df #:hop-db
-   #:build-relay-body #:parse-relay-body #:recognized-and-valid
+   #:build-relay-body #:parse-relay-body #:recognized-and-valid #:hop-recv-digest
    #:+r-begin+ #:+r-data+ #:+r-end+ #:+r-connected+ #:+r-sendme+
    #:+r-extend2+ #:+r-extended2+ #:+r-drop+ #:+r-resolve+ #:+r-resolved+))
 
@@ -80,7 +80,8 @@
   (:use #:cl)
   (:local-nicknames (#:u #:cl-tor.util) (#:c #:cl-tor.crypto) (#:n #:cl-tor.ntor)
                     (#:cell #:cl-tor.cell) (#:link #:cl-tor.link)
-                    (#:dir #:cl-tor.directory) (#:rc #:cl-tor.relay-crypto))
+                    (#:dir #:cl-tor.directory) (#:rc #:cl-tor.relay-crypto)
+                    (#:bt #:bordeaux-threads))
   (:export
    #:circuit #:circuit-link #:circuit-id #:circuit-hops #:circuit-length
    #:create-circuit #:extend-circuit #:build-circuit
@@ -96,5 +97,6 @@
   (:use #:cl)
   (:local-nicknames (#:u #:cl-tor.util) (#:rc #:cl-tor.relay-crypto)
                     (#:dir #:cl-tor.directory) (#:link #:cl-tor.link)
-                    (#:circ #:cl-tor.circuit) (#:strm #:cl-tor.stream))
+                    (#:circ #:cl-tor.circuit) (#:strm #:cl-tor.stream)
+                    (#:bt #:bordeaux-threads))
   (:export #:run-proxy #:build-fresh-circuit))

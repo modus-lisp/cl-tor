@@ -61,6 +61,11 @@ filled in (advances HOP's forward running digest)."
     (values (aref body 0) (u:read-u16be body 1) (u:read-u16be body 3)
             len (u:subv body 11 (+ 11 len)))))
 
+(defun hop-recv-digest (hop)
+  "The full 20-byte backward rolling digest of HOP after the last recognized cell
+(used as the authenticator in circuit-level v1 SENDMEs)."
+  (ironclad:produce-digest (ironclad:copy-digest (hop-db hop))))
+
 (defun recognized-and-valid (hop body)
   "T iff BODY (already CTR-decrypted for HOP) is recognized at HOP: Recognized==0
 and the backward running digest matches.  Commits HOP's backward digest on match."
