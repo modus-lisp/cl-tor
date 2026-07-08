@@ -2,7 +2,8 @@
 ;;;;
 ;;;; This is the bridge that makes a Tor exit stream look like an ordinary binary
 ;;;; socket stream to callers (read-sequence/read-byte/write-sequence/force-output/
-;;;; close), so e.g. cl-consensus's peer read loop can run over Tor unchanged.
+;;;; close), so e.g. cl-consensus's peer read loop can run over Tor unchanged.  Part
+;;;; of the cl-tor-transport provider (not the core Tor client).
 ;;;;
 ;;;; One circuit carries one stream (a fresh circuit per connection — the SOCKS
 ;;;; server's model), so a dedicated reader thread is the sole caller of RECV-RELAY
@@ -11,14 +12,14 @@
 ;;;; DATA); the TLS link tolerates one-reader-one-writer.  Uses sb-gray today; the
 ;;;; method set is the portable Gray-streams contract for the modus port.
 
-(defpackage #:cl-transport.stream
+(defpackage #:cl-tor.gray-stream
   (:use #:cl)
   (:local-nicknames (#:circ #:cl-tor.circuit) (#:strm #:cl-tor.stream)
                     (#:rc #:cl-tor.relay-crypto) (#:link #:cl-tor.link)
                     (#:bt #:bordeaux-threads))
   (:export #:tor-stream #:make-tor-stream #:tor-stream-circuit))
 
-(in-package #:cl-transport.stream)
+(in-package #:cl-tor.gray-stream)
 
 (defclass tor-stream (sb-gray:fundamental-binary-input-stream
                       sb-gray:fundamental-binary-output-stream)
