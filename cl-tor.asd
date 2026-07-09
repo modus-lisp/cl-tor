@@ -20,6 +20,7 @@
     ((:file "packages")   ; package layout
      (:file "util")       ; hex, byte ops, big/little-endian framing
      (:file "crypto")     ; thin wrappers over ironclad (the cipher suite Tor uses)
+     (:file "ed25519")    ; Ed25519 group arithmetic + v3 onion key blinding
      (:file "ntor")       ; ntor-curve25519-sha256-1 circuit handshake + key derivation
      (:file "directory")  ; minimal directory bootstrap: consensus + microdescs + selection
      (:file "cell")       ; cell framing (fixed + variable)
