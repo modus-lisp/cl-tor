@@ -71,7 +71,7 @@
   (:use #:cl)
   (:local-nicknames (#:u #:cl-tor.util) (#:c #:cl-tor.crypto) (#:n #:cl-tor.ntor))
   (:export
-   #:hop #:make-hop #:hop-relay #:hop-kf #:hop-kb #:hop-df #:hop-db
+   #:hop #:make-hop #:make-hs-hop #:hop-relay #:hop-kf #:hop-kb #:hop-df #:hop-db
    #:build-relay-body #:parse-relay-body #:recognized-and-valid #:hop-recv-digest
    #:+r-begin+ #:+r-data+ #:+r-end+ #:+r-connected+ #:+r-sendme+
    #:+r-extend2+ #:+r-extended2+ #:+r-drop+ #:+r-resolve+ #:+r-resolved+))

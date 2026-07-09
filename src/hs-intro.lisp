@@ -11,13 +11,15 @@
   (:use #:cl)
   (:local-nicknames (#:u #:cl-tor.util) (#:c #:cl-tor.crypto) (#:ed #:cl-tor.ed25519)
                     (#:dir #:cl-tor.directory) (#:circ #:cl-tor.circuit) (#:link #:cl-tor.link)
-                    (#:desc #:cl-tor.hsdesc))
-  (:export #:introduce #:*hs-ntor-protoid*))
+                    (#:rc #:cl-tor.relay-crypto) (#:strm #:cl-tor.stream)
+                    (#:hsdir #:cl-tor.hsdir) (#:desc #:cl-tor.hsdesc))
+  (:export #:introduce #:rend-complete #:connect-onion #:*hs-ntor-protoid*))
 
 (in-package #:cl-tor.hs-intro)
 
 (defconstant +r-establish-rendezvous+ 33)
 (defconstant +r-introduce1+ 34)
+(defconstant +r-rendezvous2+ 37)
 (defconstant +r-rendezvous-established+ 39)
 (defconstant +r-introduce-ack+ 40)
 
@@ -138,3 +140,65 @@
                 :x x :xpub xpub
                 :auth-key (desc:intro-point-auth-key intro-point)
                 :enc-key (desc:intro-point-enc-key intro-point)))))))
+
+;;; --- rendezvous completion (H5): finish hs-ntor + splice the service hop ------
+
+(defun %mac (key message)
+  "hs-ntor MAC: SHA3-256(htonll(len(key)) | key | message)."
+  (c:sha3-256 (u:cat (%int8be (length key)) key message)))
+
+(defun await-rendezvous2 (rend-circ)
+  "Block on REND-CIRC until RENDEZVOUS2 arrives; return its 64-byte payload (Y|AUTH)."
+  (loop (multiple-value-bind (hop rcmd sid len data) (circ:recv-relay rend-circ)
+          (declare (ignore hop sid len))
+          (when (= rcmd +r-rendezvous2+) (return data)))))
+
+(defun rend-complete (result rv2)
+  "Complete the client<->service hs-ntor from the RENDEZVOUS2 payload RV2 (Y|AUTH)
+   and RESULT (from INTRODUCE): verify AUTH, derive the rendezvous keys, and append
+   the service as a SHA3-256/AES-256-CTR hop.  Returns the circuit, ready for streams."
+  (let* ((x (getf result :x)) (xpub (getf result :xpub))
+         (b (getf result :enc-key)) (auth-key (getf result :auth-key))
+         (rend-circ (getf result :rend-circ))
+         (y (subseq rv2 0 32)) (auth-recv (subseq rv2 32 64))
+         (protoid (u:ascii->bytes *hs-ntor-protoid*))
+         (tweak (lambda (s) (u:ascii->bytes (concatenate 'string *hs-ntor-protoid* s))))
+         (rend-secret (u:cat (c:x25519 x y) (c:x25519 x b) auth-key b xpub y protoid))
+         (ntor-key-seed (%mac rend-secret (funcall tweak ":hs_key_extract")))
+         (verify (%mac rend-secret (funcall tweak ":hs_verify")))
+         (auth-input (u:cat verify auth-key b y xpub protoid (u:ascii->bytes "Server")))
+         (auth-mac (%mac auth-input (funcall tweak ":hs_mac"))))
+    (unless (equalp auth-mac auth-recv)
+      (error "hs-rend: AUTH mismatch — service handshake not authenticated"))
+    (let* ((k (ed:shake256 (u:cat ntor-key-seed (funcall tweak ":hs_key_expand")) 128))
+           (hop (rc:make-hs-hop nil (subseq k 64 96) (subseq k 96 128)   ; Kf Kb
+                                    (subseq k 0 32) (subseq k 32 64))))   ; Df Db
+      (setf (circ:circuit-hops rend-circ)
+            (append (circ:circuit-hops rend-circ) (list hop)))
+      rend-circ)))
+
+;;; --- full client -------------------------------------------------------------
+
+(defun connect-onion (onion &key (port 80))
+  "Connect to a v3 ONION service: fetch+decrypt its descriptor, introduce, complete
+   the rendezvous, and open a stream to PORT.  Tries intro points until one works.
+   Returns (values circuit stream-id)."
+  (let* ((pk (hsdir:onion->pubkey onion))
+         (text (dir:fetch-consensus))
+         (relays (dir:consensus-relays)))
+    (multiple-value-bind (va cur prev params) (hsdir:parse-consensus-header text)
+      (multiple-value-bind (tp plen srv) (hsdir:time-period-and-srv va cur prev params)
+        (declare (ignore srv))
+        (let* ((outer (hsdir:fetch-descriptor onion))
+               (inner (desc:decrypt-descriptor outer pk tp plen))
+               (points (desc:intro-points inner))
+               (subcred (ed:subcredential pk (ed:blind-public-key pk tp plen))))
+          (dolist (ip points (error "connect-onion: all ~d intro points failed" (length points)))
+            (handler-case
+                (let ((result (introduce ip subcred relays)))
+                  (unless (eql 0 (getf result :status))
+                    (error "INTRODUCE_ACK status ~a" (getf result :status)))
+                  (let* ((circ (rend-complete result (await-rendezvous2 (getf result :rend-circ))))
+                         (sid (strm:begin-stream circ "" port)))
+                    (return-from connect-onion (values circ sid))))
+              (error (e) (format *error-output* "  intro point failed: ~a~%" e)))))))))

@@ -39,6 +39,19 @@
              :df (%seeded-sha1 (n:circuit-keys-df keys))
              :db (%seeded-sha1 (n:circuit-keys-db keys))))
 
+(defun %seeded-sha3-256 (seed)
+  (let ((d (ironclad:make-digest :sha3/256))) (ironclad:update-digest d seed) d))
+
+(defun make-hs-hop (relay kf kb df db)
+  "Build a v3 rendezvous (client<->service) hop: AES-256-CTR ciphers + SHA3-256
+running digests, from the raw 32-byte hs-ntor keys.  The cell machinery
+(build-relay-body / recognized-and-valid) is digest-agnostic, so it just works."
+  (%make-hop :relay relay
+             :kf (c:aes128-ctr-cipher kf)     ; 32-byte key -> AES-256-CTR
+             :kb (c:aes128-ctr-cipher kb)
+             :df (%seeded-sha3-256 df)
+             :db (%seeded-sha3-256 db)))
+
 (defun %digest4 (running)
   "First 4 bytes of RUNNING's current value (non-destructive)."
   (subseq (ironclad:produce-digest (ironclad:copy-digest running)) 0 4))
