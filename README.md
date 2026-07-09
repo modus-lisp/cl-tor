@@ -51,6 +51,12 @@ yet guarantee. No warranty (see [LICENSE](LICENSE)).
   relay family); **RSA identity cross-cert** validation in the link CERTS cell
   (certs 2/7, matched to the consensus RSA fingerprint); TLS 1.2 link pinning;
   crash-safe daemon. *Live: real relays pass full cert validation.*
+- **Onion services (v3 client)** ✅ — dial `.onion` addresses end to end:
+  Ed25519 key **blinding**, the **HSDir** hash ring (time period + shared-random),
+  fetch + **two-layer decrypt** of the descriptor (SHAKE256 KDF, SHA3-256 MAC,
+  AES-256-CTR), the **hs-ntor** handshake, `ESTABLISH_RENDEZVOUS` + `INTRODUCE1`,
+  and the rendezvous splice (a SHA3-256/AES-256 service hop). *Live: `connect-onion`
+  reaches DuckDuckGo's onion and pulls back a real HTTP response.*
 
 ## Roadmap
 
@@ -67,17 +73,29 @@ is byte-exact).
 6. **Hardening** ✅ — SENDME, guard persistence, path constraints (/16 +
    nickname + family), RSA identity cross-cert validation, TLS-1.2 pinning,
    crash-safety.
+7. **Onion services (v3 client)** ✅ — key blinding, HSDir ring, descriptor
+   decrypt, hs-ntor, INTRODUCE1/rendezvous; `.onion` dialing verified live.
 
 ## Layout
 
 ```
 cl-tor.asd              ASDF system
+cl-tor-transport.asd    optional cl-transport backend (dial over Tor / .onion)
 src/
   packages              package layout
   util                  bytes / hex / big-endian cell framing
   crypto                the Tor cipher suite over ironclad
   ntor                  ntor-curve25519-sha256-1 handshake + key derivation
-  (soon) cell link circuit relay-crypto directory stream socks
+  directory             consensus fetch + signature validation + path selection
+  cell                  fixed/variable cell framing
+  link                  TLS link handshake + cert-chain validation
+  relay-crypto          per-hop onion crypto (AES-CTR + running digest)
+  circuit               CREATE2 / EXTEND2 + relay cell send/recv
+  stream                RELAY_BEGIN/DATA/END streams
+  socks                 local SOCKS5 proxy onto fresh circuits
+  hs-dir                v3 onion HSDir hash ring (time period, SRV, indices)
+  hs-desc               v3 descriptor two-layer decrypt + intro points
+  hs-intro              hs-ntor + INTRODUCE1 + rendezvous -> connect-onion
 inspect/
   offline-test.lisp     crypto + ntor gate
   run-all.sh            run it
