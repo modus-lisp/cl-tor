@@ -3,9 +3,10 @@
 A from-scratch **Tor client in Common Lisp.**
 
 The goal is a real, usable Tor client — connect to the live Tor network, build
-3-hop circuits, and expose a local **SOCKS5** proxy so any program can route
-through it — implemented clean-room in Lisp, with **nothing wrapping C-tor or
-Arti**. It runs on SBCL today and is written to stay portable toward
+3-hop circuits, expose a local **SOCKS5** proxy so any program can route through
+it, **dial v3 `.onion` services**, and **run your own** — implemented clean-room in
+Lisp, with **nothing wrapping C-tor or Arti**. It runs on SBCL today and is written
+to stay portable toward
 [modus](https://github.com/ynniv/modus) (the bare-metal Lisp OS), where the same
 protocol core can sit on the native TCP/TLS/crypto stack instead of SBCL's.
 
@@ -57,6 +58,13 @@ yet guarantee. No warranty (see [LICENSE](LICENSE)).
   AES-256-CTR), the **hs-ntor** handshake, `ESTABLISH_RENDEZVOUS` + `INTRODUCE1`,
   and the rendezvous splice (a SHA3-256/AES-256 service hop). *Live: `connect-onion`
   reaches DuckDuckGo's onion and pulls back a real HTTP response.*
+- **Onion services (v3 host)** ✅ — *be* a `.onion`, not just dial one: from-scratch
+  **Ed25519 signing** (standard + blinded-key), **build/sign/encrypt** the descriptor,
+  `ESTABLISH_INTRO` at real intro points, **publish** to the responsible HSDirs, and
+  serve inbound `INTRODUCE2` → `RENDEZVOUS1` → an end-to-end stream. The enc-key
+  cross-cert (curve25519→ed25519) is byte-verified against real descriptors, so the
+  service is valid for **any** Tor client. *Live: `run-service` publishes to the real
+  HSDirs and our own client connects back end to end; validated against stock Tor.*
 
 ## Roadmap
 
@@ -75,6 +83,9 @@ is byte-exact).
    crash-safety.
 7. **Onion services (v3 client)** ✅ — key blinding, HSDir ring, descriptor
    decrypt, hs-ntor, INTRODUCE1/rendezvous; `.onion` dialing verified live.
+8. **Onion services (v3 host)** ✅ — Ed25519 signing (incl. blinded-key), descriptor
+   build/sign/encrypt, ESTABLISH_INTRO, HSDir publish, INTRODUCE2/RENDEZVOUS1; run
+   your own `.onion`, validated against stock Tor.
 
 ## Layout
 
@@ -95,7 +106,9 @@ src/
   socks                 local SOCKS5 proxy onto fresh circuits
   hs-dir                v3 onion HSDir hash ring (time period, SRV, indices)
   hs-desc               v3 descriptor two-layer decrypt + intro points
-  hs-intro              hs-ntor + INTRODUCE1 + rendezvous -> connect-onion
+  hs-intro              hs-ntor + INTRODUCE1 + rendezvous -> connect-onion (client)
+  hs-service            build/sign/encrypt the descriptor (service)
+  hs-host               ESTABLISH_INTRO + publish + INTRODUCE2/RENDEZVOUS1 -> run-service
 inspect/
   offline-test.lisp     crypto + ntor gate
   run-all.sh            run it
