@@ -49,7 +49,8 @@
               ((and (= rcmd rc:+r-end+) (= rsid sid))
                (bt:with-lock-held (lock) (setf eof t) (bt:condition-notify cv))
                (return)))))
-      (serious-condition ()
+      (serious-condition (e)
+        (format *error-output* "~&[reader-loop died: ~a]~%" e)
         (bt:with-lock-held (lock) (setf eof t) (bt:condition-notify cv))))))
 
 (defun make-tor-stream (circuit sid)
