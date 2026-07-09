@@ -95,10 +95,12 @@
    descriptor signing key)."
   (let* ((auth-pub (ed:secret-to-public (intro-auth-seed ip)))
          (auth-cert (%cert #x09 auth-pub exp-hours sign-fn :signing-ext-key signing-pub))
-         ;; enc-key-cert: cross-cert for the ntor enc key.  The HSDir can't see it
-         ;; (encrypted) and our client ignores it; the certified key is a placeholder
-         ;; until the curve25519->ed25519 conversion lands (stock-Tor hardening).
-         (enc-cert (%cert #x0b (intro-enc-pub ip) exp-hours sign-fn :signing-ext-key signing-pub)))
+         ;; enc-key-cert (cross-cert, type 0B): certifies the Ed25519 equivalent of the
+         ;; ntor enc key (prop228 App. A: y=(u-1)/(u+1), signbit 0), signed by the
+         ;; descriptor signing key.  Stock-Tor clients validate this before using the
+         ;; intro point — the conversion is byte-verified against real descriptors.
+         (enc-cert (%cert #x0b (ed:curve25519->ed25519 (intro-enc-pub ip) 0)
+                          exp-hours sign-fn :signing-ext-key signing-pub)))
     (format nil "introduction-point ~a~%onion-key ntor ~a~%auth-key~%~a~%enc-key ntor ~a~%enc-key-cert~%~a~%"
             (%b64 (intro-link-specs ip)) (%b64 (intro-onion-key ip))
             (%cert-pem auth-cert) (%b64 (intro-enc-pub ip)) (%cert-pem enc-cert))))

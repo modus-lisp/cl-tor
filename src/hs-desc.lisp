@@ -15,7 +15,7 @@
   (:local-nicknames (#:u #:cl-tor.util) (#:c #:cl-tor.crypto) (#:ed #:cl-tor.ed25519))
   (:export #:decrypt-descriptor #:intro-points
            #:intro-point #:intro-point-link-specs #:intro-point-onion-key
-           #:intro-point-auth-key #:intro-point-enc-key))
+           #:intro-point-auth-key #:intro-point-enc-key #:intro-point-enc-cert))
 
 (in-package #:cl-tor.hsdesc)
 
@@ -72,7 +72,8 @@
   link-specs      ; raw link specifiers of the intro-point RELAY (NSPEC|{type,len,spec}...)
   onion-key       ; that relay's ntor key (to build a circuit to it)
   auth-key        ; intro AUTH_KEY (ed25519, from the auth-key cert's certified key)
-  enc-key)        ; the service's ntor enc key B for this intro (hs-ntor)
+  enc-key         ; the service's ntor enc key B for this intro (hs-ntor)
+  enc-cert)       ; ed25519 certified key of the enc-key cross-cert (== curve25519->ed25519 enc-key)
 
 (defun %cert-certified-key (cert-bytes)
   "The 32-byte CERTIFIED_KEY of a Tor ed25519 cert (cert-spec): version(1) type(1)
@@ -87,8 +88,9 @@
     (flet ((flush-cert ()
              (when (and pending-cert-for cert-acc cur)
                (let ((cert (u:base64-decode (apply #'concatenate 'string (nreverse cert-acc)))))
-                 (when (eq pending-cert-for :auth)
-                   (setf (intro-point-auth-key cur) (%cert-certified-key cert))))
+                 (case pending-cert-for
+                   (:auth (setf (intro-point-auth-key cur) (%cert-certified-key cert)))
+                   (:enc-cert (setf (intro-point-enc-cert cur) (%cert-certified-key cert)))))
                (setf pending-cert-for nil cert-acc nil))))
       (with-input-from-string (in inner-text)
         (loop for line = (read-line in nil) while line do

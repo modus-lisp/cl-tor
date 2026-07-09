@@ -216,7 +216,8 @@
                   (not (member (dir:relay-ed-id r) used :test #'equalp)))
           do (return r)))
 
-(defun run-service (identity handler &key (num-intros *num-intro-points*) (revision 1))
+(defun run-service (identity handler &key (num-intros *num-intro-points*)
+                                          (revision (get-universal-time)))
   "Bring IDENTITY's onion service online and SERVE it.  One thread per intro point
    ESTABLISHES its own circuit (so each socket is owned by the thread that reads it —
    the SBCL socket/thread-affinity rule) and loops handling introductions, calling

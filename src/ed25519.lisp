@@ -14,7 +14,7 @@
            #:point-add #:blind-public-key #:blind-secret-scalar
            #:credential #:subcredential #:shake256
            #:expand-seed #:secret-to-public #:sign #:sign-with-scalar #:blind-sign
-           #:int->le #:le->int #:int->be))
+           #:curve25519->ed25519 #:int->le #:le->int #:int->be))
 
 (in-package #:cl-tor.ed25519)
 
@@ -190,6 +190,16 @@
   "Standard RFC-8032 Ed25519 signature over MESSAGE with a 32-byte SEED."
   (multiple-value-bind (scalar prefix) (expand-seed seed)
     (sign-with-scalar scalar prefix message (point-encode (scalarmult-base scalar)))))
+
+(defun curve25519->ed25519 (u-bytes &optional (signbit 0))
+  "The Ed25519 public key equivalent to a curve25519 (Montgomery) public key
+   (proposal 228 App. A): birational map y = (u-1)/(u+1); encode y little-endian with
+   bit 255 = SIGNBIT.  Used for the descriptor's enc-key cross-cert."
+  (let* ((u (mod (logand (le->int u-bytes) (1- (ash 1 255))) +p+))
+         (y (fmul (fsub u 1) (finv (fadd u 1))))
+         (b (int->le y 32)))
+    (setf (aref b 31) (logior (aref b 31) (ash (logand signbit 1) 7)))
+    b))
 
 (defun blind-sign (identity-seed identity-pubkey period-number period-length message
                    &optional secret)
