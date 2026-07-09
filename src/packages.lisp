@@ -39,7 +39,7 @@
   (:local-nicknames (#:u #:cl-tor.util) (#:c #:cl-tor.crypto))
   (:export
    #:*authorities* #:http-get #:fetch-consensus #:parse-consensus
-   #:fetch-microdesc #:enrich-relay
+   #:fetch-microdesc #:enrich-relay #:enrich-relays
    #:relay #:relay-nickname #:relay-rsa-id #:relay-ip #:relay-or-port
    #:relay-flags #:relay-bandwidth #:relay-md-digest #:relay-exit-ports
    #:relay-ntor-key #:relay-ed-id #:relay-has-flag

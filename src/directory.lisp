@@ -264,6 +264,53 @@ nil) and parse it into RELAY structs."
                    (setf family-ids (rest tk)))))))
       (values ntor ed policy family family-ids))))
 
+(defun %microdesc-blocks (bytes)
+  "Split a /tor/micro/d response byte vector into (raw-sha256-digest . block-bytes)
+   per microdescriptor (each starts with an 'onion-key' line).  The SHA-256 of the
+   exact block bytes is the microdescriptor digest used in the consensus 'm' line."
+  (let ((marker (map 'list #'char-code "onion-key")) (starts '()))
+    (loop for i from 0 below (length bytes)
+          when (and (or (= i 0) (= (aref bytes (1- i)) 10))                 ; line start
+                    (<= (+ i (length marker) 1) (length bytes))
+                    (loop for j from 0 for cc in marker always (= (aref bytes (+ i j)) cc))
+                    (= (aref bytes (+ i (length marker))) 10))              ; line is exactly "onion-key"
+            do (push i starts))
+    (setf starts (nreverse starts))
+    (loop for (s . rest) on starts
+          for e = (if rest (first rest) (length bytes))
+          for block = (subseq bytes s e)
+          collect (cons (c:sha256 block) block))))
+
+(defun enrich-relays (relays &key (authority (first *authorities*)) (batch 48))
+  "Batch-fetch microdescriptors and fill ntor-key + ed-id for the RELAYS that still
+   need it (have an 'm' digest, no ed-id).  Matches each returned microdescriptor to
+   its relay by SHA-256 digest.  Returns the number newly enriched."
+  (destructuring-bind (name host port &rest _) authority
+    (declare (ignore name _))
+    (let* ((todo (remove-if (lambda (r) (or (null (relay-md-digest r)) (relay-ed-id r))) relays))
+           (by-digest (make-hash-table :test 'equalp)) (n 0))
+      (dolist (r todo)
+        (ignore-errors (setf (gethash (u:base64-decode (relay-md-digest r)) by-digest) r)))
+      (loop for chunk on todo by (lambda (l) (nthcdr batch l))
+            for digests = (loop for r in chunk repeat batch collect (relay-md-digest r))
+            do (let ((bytes (ignore-errors
+                             (http-get host port (format nil "/tor/micro/d/~{~a~^-~}" digests)))))
+                 (when bytes
+                   (dolist (blk (%microdesc-blocks bytes))
+                     (let ((r (gethash (car blk) by-digest)))
+                       (when r
+                         (let ((text (map 'string #'code-char (cdr blk))) ntor ed)
+                           (with-input-from-string (in text)
+                             (loop for line = (read-line in nil) while line do
+                               (let ((tk (%tokens line)))
+                                 (cond ((string= (first tk) "ntor-onion-key") (setf ntor (u:base64-decode (second tk))))
+                                       ((and (string= (first tk) "id") (string= (second tk) "ed25519"))
+                                        (setf ed (u:base64-decode (third tk))))))))
+                           (when ed
+                             (setf (relay-ed-id r) ed (relay-ntor-key r) ntor)
+                             (incf n)))))))))
+      n)))
+
 (defun enrich-relay (relay &key (authority (first *authorities*)))
   "Fill RELAY's ntor-key, ed-id, exit-ports, and family info from its microdescriptor."
   (when (relay-md-digest relay)

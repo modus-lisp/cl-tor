@@ -9,9 +9,12 @@
 (defpackage #:cl-tor.hsdir
   (:use #:cl)
   (:local-nicknames (#:u #:cl-tor.util) (#:c #:cl-tor.crypto)
-                    (#:ed #:cl-tor.ed25519) (#:dir #:cl-tor.directory))
+                    (#:ed #:cl-tor.ed25519) (#:dir #:cl-tor.directory)
+                    (#:circ #:cl-tor.circuit) (#:strm #:cl-tor.stream)
+                    (#:rc #:cl-tor.relay-crypto) (#:link #:cl-tor.link))
   (:export #:parse-consensus-header #:time-period-and-srv
            #:hsdir-index #:hs-index #:responsible-hsdirs
+           #:onion->pubkey #:fetch-descriptor
            #:*hsdir-n-replicas* #:*hsdir-spread-fetch*))
 
 (in-package #:cl-tor.hsdir)
@@ -115,3 +118,118 @@
           (let ((r (cdr (nth (mod (+ start k) (length ring)) ring))))
             (pushnew r chosen)))))
     (nreverse chosen)))
+
+;;; --- .onion decode + base64 (rend-spec-v3 §6 address encoding) ---------------
+
+(defparameter +b32+ "abcdefghijklmnopqrstuvwxyz234567")
+
+(defun %base32-decode (string)
+  (let ((bits 0) (nbits 0)
+        (out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+    (loop for ch across (string-downcase string)
+          for v = (position ch +b32+)
+          do (unless v (error "base32: bad char ~s" ch))
+             (setf bits (logior (ash bits 5) v) nbits (+ nbits 5))
+             (when (>= nbits 8)
+               (decf nbits 8)
+               (vector-push-extend (logand (ash bits (- nbits)) #xff) out)))
+    (coerce out '(simple-array (unsigned-byte 8) (*)))))
+
+(defun onion->pubkey (onion)
+  "Decode a v3 .onion address to its 32-byte Ed25519 identity public key.  Verifies
+   the version byte and checksum = SHA3-256(\".onion checksum\" | pubkey | v)[:2]."
+  (let* ((label (string-downcase (subseq onion 0 (or (search ".onion" onion) (length onion)))))
+         (raw (%base32-decode label)))
+    (unless (and (= (length raw) 35) (= (aref raw 34) 3)) (error "onion: bad v3 address"))
+    (let* ((pk (subseq raw 0 32))
+           (ck (subseq raw 32 34))
+           (want (subseq (c:sha3-256 (u:cat (u:ascii->bytes ".onion checksum") pk #(3))) 0 2)))
+      (unless (equalp ck want) (error "onion: bad checksum"))
+      pk)))
+
+(defparameter +b64+ "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+
+(defun %base64-encode (bytes)
+  (with-output-to-string (s)
+    (loop for i from 0 below (length bytes) by 3
+          for n = (- (length bytes) i)
+          for b0 = (aref bytes i)
+          for b1 = (if (> n 1) (aref bytes (+ i 1)) 0)
+          for b2 = (if (> n 2) (aref bytes (+ i 2)) 0)
+          do (write-char (char +b64+ (ash b0 -2)) s)
+             (write-char (char +b64+ (logior (ash (logand b0 3) 4) (ash b1 -4))) s)
+             (write-char (if (> n 1) (char +b64+ (logior (ash (logand b1 15) 2) (ash b2 -6))) #\=) s)
+             (write-char (if (> n 2) (char +b64+ (logand b2 63)) #\=) s))))
+
+;;; --- descriptor fetch over a circuit ----------------------------------------
+
+(defvar *relays-cache* nil)
+(defun %relays ()
+  (or *relays-cache* (setf *relays-cache* (dir:consensus-relays))))
+
+(defun %hsdirs (relays)
+  "HSDir+Running relays with ed25519 ids (batch-enriched); the ring nodes."
+  (let ((hs (remove-if-not (lambda (r) (and (dir:relay-has-flag r "HSDir")
+                                            (dir:relay-has-flag r "Running")))
+                           relays)))
+    (dir:enrich-relays hs)
+    (remove-if-not #'dir:relay-ed-id hs)))
+
+(defun %build-circuit-to (exit relays)
+  "Build a 3-hop circuit whose exit is EXIT (a chosen, enriched relay)."
+  (dir:enrich-relay exit)
+  (let* ((guard (dir:enrich-relay (dir:pick-relay :flag "Guard" :relays relays)))
+         (middle (loop for m = (dir:pick-relay :relays relays)
+                       until (and (not (equalp (dir:relay-ed-id m) (dir:relay-ed-id exit)))
+                                  (not (equalp (dir:relay-rsa-id m) (dir:relay-rsa-id guard))))
+                       finally (return (dir:enrich-relay m))))
+         (lk (link:connect-link guard)))
+    (handler-case (circ:build-circuit lk middle exit)
+      (error (e) (ignore-errors (link:close-link lk)) (error e)))))
+
+(defconstant +r-begin-dir+ 13)
+
+(defun %http-body (bytes)
+  (let ((i (search #(13 10 13 10) bytes)))
+    (if i (subseq bytes (+ i 4)) bytes)))
+
+(defun %fetch-over-circuit (circ path &key (sid 1))
+  "RELAY_BEGIN_DIR to the last hop, HTTP/1.0 GET PATH, return the response BODY bytes."
+  (circ:send-relay circ +r-begin-dir+ sid #())
+  (loop (multiple-value-bind (hop rcmd rsid len data) (circ:recv-relay circ)
+          (declare (ignore hop len data))
+          (cond ((and (= rcmd rc:+r-connected+) (= rsid sid)) (return))
+                ((and (= rcmd rc:+r-end+) (= rsid sid)) (error "dir stream refused")))))
+  (strm:send-stream-data circ sid
+    (u:ascii->bytes (format nil "GET ~a HTTP/1.0~c~c~c~c" path #\Return #\Newline #\Return #\Newline)))
+  (let ((out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+    (loop (multiple-value-bind (hop rcmd rsid len data) (circ:recv-relay circ)
+            (declare (ignore hop rsid len))
+            (cond ((= rcmd rc:+r-data+) (loop for b across data do (vector-push-extend b out)))
+                  ((= rcmd rc:+r-end+) (return)))))
+    (%http-body (coerce out '(simple-array (unsigned-byte 8) (*))))))
+
+(defun fetch-descriptor (onion)
+  "Fetch the raw v3 descriptor text for ONION from a responsible HSDir over a fresh
+   Tor circuit.  Returns the descriptor string (starts with \"hs-descriptor 3\")."
+  (let* ((pubkey (onion->pubkey onion))
+         (relays (%relays))
+         (text (dir:fetch-consensus)))
+    (multiple-value-bind (va cur prev params) (parse-consensus-header text)
+      (multiple-value-bind (tp plen srv) (time-period-and-srv va cur prev params)
+        (let* ((hsdirs (%hsdirs relays))
+               (blinded (ed:blind-public-key pubkey tp plen))
+               (path (format nil "/tor/hs/3/~a" (%base64-encode blinded)))
+               (responsible (responsible-hsdirs pubkey hsdirs tp plen srv)))
+          (dolist (hd responsible (error "no responsible HSDir served ~a" onion))
+            (let ((circ nil))
+              (handler-case
+                  (progn
+                    (setf circ (%build-circuit-to hd relays))
+                    (let ((body (map 'string #'code-char (%fetch-over-circuit circ path))))
+                      (ignore-errors (circ:destroy-circuit circ))
+                      (ignore-errors (link:close-link (circ:circuit-link circ)))
+                      (when (search "hs-descriptor" body) (return body))))
+                (serious-condition ()
+                  (when circ (ignore-errors (circ:destroy-circuit circ))
+                        (ignore-errors (link:close-link (circ:circuit-link circ)))))))))))))
