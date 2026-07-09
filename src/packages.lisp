@@ -60,7 +60,8 @@
   (:local-nicknames (#:u #:cl-tor.util)
                     (#:c #:cl-tor.crypto)
                     (#:cell #:cl-tor.cell)
-                    (#:dir #:cl-tor.directory))
+                    (#:dir #:cl-tor.directory)
+                    (#:bt #:bordeaux-threads))
   (:export
    #:link #:connect-link #:close-link
    #:link-relay #:link-version #:link-circid-len #:link-stream #:link-sock

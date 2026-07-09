@@ -148,16 +148,25 @@ matched to the consensus RSA id.  Returns the Ed25519 identity, or signals."
 
 ;;; ---- connect ------------------------------------------------------------
 
+(defvar *tls-setup-lock* (bt:make-lock "cl+ssl-setup")
+  "Serializes cl+ssl context + client-stream CREATION.  cl+ssl's global init /
+   context setup mutates process-global OpenSSL state that races with concurrent
+   creation (corrupting in-flight streams — 'wrong version number' / GCM failures)
+   when the onion service builds circuits from several threads at once.  I/O on an
+   already-built stream is not locked.")
+
 (defun connect-link (relay &key (timeout 20))
   "Open and complete a link handshake to RELAY (a dir:relay).  Returns a LINK."
   (let* ((ip (dir:relay-ip relay)) (port (dir:relay-or-port relay))
          (sock (usocket:socket-connect ip port :element-type '(unsigned-byte 8)
                                                :timeout timeout))
-         (ctx (let ((c (cl+ssl:make-context :verify-mode cl+ssl:+ssl-verify-none+)))
-                (cl+ssl::ssl-ctx-set-max-proto-version c +tls1.2-version+) c))
-         (tls (cl+ssl:with-global-context (ctx :auto-free-p nil)
-                (cl+ssl:make-ssl-client-stream (usocket:socket-stream sock)
-                                               :verify nil :hostname ip)))
+         (ctx (bt:with-lock-held (*tls-setup-lock*)
+                (let ((c (cl+ssl:make-context :verify-mode cl+ssl:+ssl-verify-none+)))
+                  (cl+ssl::ssl-ctx-set-max-proto-version c +tls1.2-version+) c)))
+         (tls (bt:with-lock-held (*tls-setup-lock*)
+                (cl+ssl:with-global-context (ctx :auto-free-p nil)
+                  (cl+ssl:make-ssl-client-stream (usocket:socket-stream sock)
+                                                 :verify nil :hostname ip))))
          (link (%make-link :relay relay :sock sock :stream tls :ctx ctx :circid-len 2)))
     (handler-case
         (progn
