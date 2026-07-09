@@ -12,7 +12,9 @@
   (:local-nicknames (#:u #:cl-tor.util) (#:c #:cl-tor.crypto))
   (:export #:+l+ #:point-decode #:point-encode #:scalarmult #:scalarmult-base
            #:point-add #:blind-public-key #:blind-secret-scalar
-           #:credential #:subcredential #:shake256))
+           #:credential #:subcredential #:shake256
+           #:expand-seed #:secret-to-public #:sign #:sign-with-scalar #:blind-sign
+           #:int->le #:le->int #:int->be))
 
 (in-package #:cl-tor.ed25519)
 
@@ -151,3 +153,51 @@
 (defun subcredential (identity-pubkey blinded-pubkey)
   (c:sha3-256 (u:cat (u:ascii->bytes "subcredential")
                      (credential identity-pubkey) blinded-pubkey)))
+
+;;; --- Ed25519 signing (RFC 8032) + blinded-key signing -----------------------
+;;;
+;;; cl-tor.crypto only verifies; the onion SERVICE has to SIGN — the descriptor,
+;;; its certs, and ESTABLISH_INTRO.  Standard signing follows RFC 8032; the
+;;; descriptor cert is signed by the *blinded* key, whose scalar a' = h*a has no
+;;; seed, so we sign from the explicit scalar.  A verifier only checks
+;;; S*B = R + H(R|A|M)*A, so any secret unique nonce is fine — we derive it
+;;; deterministically from the signer's own prefix so signing needs no entropy.
+
+(defun %sha512 (bytes) (ironclad:digest-sequence :sha512 (u:cat bytes)))
+
+(defun expand-seed (seed)
+  "RFC 8032: SHA-512(SEED) -> (values scalar prefix), scalar clamped."
+  (let* ((h (%sha512 seed)) (a (subseq h 0 32)) (prefix (subseq h 32 64)))
+    (setf (aref a 0)  (logand (aref a 0) 248)
+          (aref a 31) (logand (aref a 31) 127)
+          (aref a 31) (logior (aref a 31) 64))
+    (values (le->int a) prefix)))
+
+(defun secret-to-public (seed)
+  "The 32-byte Ed25519 public key for SEED."
+  (point-encode (scalarmult-base (expand-seed seed))))
+
+(defun sign-with-scalar (scalar prefix message pubkey)
+  "Ed25519 signature R|S (64 bytes) over MESSAGE from an explicit SCALAR + nonce
+   PREFIX under PUBKEY.  Handles both seed-derived and BLINDED keys."
+  (let* ((r (mod (le->int (%sha512 (u:cat prefix message))) +l+))
+         (rr (point-encode (scalarmult-base r)))
+         (k (mod (le->int (%sha512 (u:cat rr pubkey message))) +l+))
+         (s (mod (+ r (* k scalar)) +l+)))
+    (u:cat rr (int->le s 32))))
+
+(defun sign (seed message)
+  "Standard RFC-8032 Ed25519 signature over MESSAGE with a 32-byte SEED."
+  (multiple-value-bind (scalar prefix) (expand-seed seed)
+    (sign-with-scalar scalar prefix message (point-encode (scalarmult-base scalar)))))
+
+(defun blind-sign (identity-seed identity-pubkey period-number period-length message
+                   &optional secret)
+  "Sign MESSAGE with the blinded key for the time period (the descriptor signing
+   cert is signed by the blinded key).  Nonce derived from the identity prefix +
+   a domain tag, so it's deterministic + secret."
+  (multiple-value-bind (scalar prefix) (expand-seed identity-seed)
+    (let* ((a-prime (blind-secret-scalar scalar identity-pubkey period-number period-length secret))
+           (a-prime-pub (blind-public-key identity-pubkey period-number period-length secret))
+           (prefix2 (c:sha3-256 (u:cat (u:ascii->bytes "blind-prefix") prefix))))
+      (sign-with-scalar a-prime prefix2 message a-prime-pub))))
