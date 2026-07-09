@@ -29,7 +29,8 @@
      (:file "circuit")    ; CREATE2 + EXTEND2 circuit construction; relay cell send/recv
      (:file "stream")     ; RELAY_BEGIN/DATA/END streams over a circuit
      (:file "socks")      ; local SOCKS5 proxy onto fresh circuits
-     (:file "hs-dir"))))  ; v3 onion HSDir hash ring (time period, SRV, indices)
+     (:file "hs-dir")      ; v3 onion HSDir hash ring (time period, SRV, indices)
+     (:file "hs-desc"))))  ; v3 descriptor 2-layer decrypt + intro points
   :in-order-to ((test-op (test-op "cl-tor/test"))))
 
 (defsystem "cl-tor/test"

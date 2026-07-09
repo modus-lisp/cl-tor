@@ -1,0 +1,88 @@
+;;;; src/hs-desc.lisp — decrypt a v3 onion service descriptor (rend-spec-v3 §2.5).
+;;;;
+;;;; The fetched descriptor is doubly encrypted.  Both layers use the same scheme:
+;;;;   blob = SALT(16) | CIPHERTEXT | MAC(32)
+;;;;   keys = SHAKE256(SECRET_DATA | subcredential | INT_8(rev) | SALT | STRING_CONST, 80)
+;;;;        -> SECRET_KEY(32, AES-256) | SECRET_IV(16) | MAC_KEY(32)
+;;;;   MAC  = SHA3-256(INT_8(32) | MAC_KEY | INT_8(16) | SALT | CIPHERTEXT)
+;;;;   plaintext = AES256-CTR(SECRET_KEY, SECRET_IV) XOR CIPHERTEXT
+;;;; Layer 1 (superencrypted): SECRET_DATA = blinded-key, STRING = "hsdir-superencrypted-data".
+;;;; Layer 2 (encrypted):      SECRET_DATA = blinded-key [| desc-cookie], STRING = "hsdir-encrypted-data".
+;;;; Inner plaintext holds the introduction points.
+
+(defpackage #:cl-tor.hsdesc
+  (:use #:cl)
+  (:local-nicknames (#:u #:cl-tor.util) (#:c #:cl-tor.crypto) (#:ed #:cl-tor.ed25519))
+  (:export #:decrypt-descriptor #:intro-points
+           #:intro-point #:intro-point-link-specs #:intro-point-onion-key
+           #:intro-point-auth-key #:intro-point-enc-key))
+
+(in-package #:cl-tor.hsdesc)
+
+(defun %int8be (n)
+  (let ((b (make-array 8 :element-type '(unsigned-byte 8))))
+    (dotimes (i 8 b) (setf (aref b (- 7 i)) (logand (ash n (* -8 i)) #xff)))))
+
+(defun %message-blob (text &key (start 0))
+  "Base64-decode the first -----BEGIN MESSAGE----- .. -----END MESSAGE----- after START."
+  (let* ((b (search "-----BEGIN MESSAGE-----" text :start2 start))
+         (e (and b (search "-----END MESSAGE-----" text :start2 b))))
+    (unless (and b e) (error "hsdesc: no MESSAGE block"))
+    (u:base64-decode
+     (remove-if (lambda (ch) (member ch '(#\Newline #\Return #\Space #\Tab)))
+                (subseq text (+ b (length "-----BEGIN MESSAGE-----")) e)))))
+
+(defun %int-field (text name)
+  "Integer value of the 'NAME <int>' line (NAME at a line start), or NIL."
+  (let* ((needle (concatenate 'string (string #\Newline) name " "))
+         (padded (concatenate 'string (string #\Newline) text))
+         (i (search needle padded)))
+    (when i (parse-integer padded :start (+ i (length needle)) :junk-allowed t))))
+
+(defun %decrypt-layer (blob secret-data subcred revision string-constant)
+  "Decrypt one descriptor layer; verify the MAC first.  Returns the plaintext string."
+  (let* ((n (length blob))
+         (salt (subseq blob 0 16))
+         (mac (subseq blob (- n 32) n))
+         (ct (subseq blob 16 (- n 32)))
+         (secret-input (u:cat secret-data subcred (%int8be revision)))
+         (keys (ed:shake256 (u:cat secret-input salt (u:ascii->bytes string-constant)) 80))
+         (key (subseq keys 0 32)) (iv (subseq keys 32 48)) (mac-key (subseq keys 48 80))
+         (want (c:sha3-256 (u:cat (%int8be 32) mac-key (%int8be 16) salt ct))))
+    (unless (equalp want mac) (error "hsdesc: ~a MAC mismatch" string-constant))
+    ;; 32-byte key -> AES-256-CTR; ctr-apply RETURNS the decrypted bytes
+    (map 'string #'code-char (c:ctr-apply (c:aes128-ctr-cipher key iv) ct))))
+
+(defun decrypt-descriptor (outer-text identity-pubkey period-num period-length &optional cookie)
+  "Decrypt both layers of a v3 descriptor OUTER-TEXT for ONION identity-pubkey in the
+   given time period.  Returns the inner plaintext (the introduction-point section)."
+  (let* ((blinded (ed:blind-public-key identity-pubkey period-num period-length))
+         (subcred (ed:subcredential identity-pubkey blinded))
+         (revision (or (%int-field outer-text "revision-counter") 0))
+         (layer1 (%decrypt-layer (%message-blob outer-text)
+                                 blinded subcred revision "hsdir-superencrypted-data"))
+         (layer2 (%decrypt-layer (%message-blob layer1)
+                                 (if cookie (u:cat blinded cookie) blinded)
+                                 subcred revision "hsdir-encrypted-data")))
+    layer2))
+
+;;; --- introduction points ----------------------------------------------------
+
+(defstruct intro-point link-specs onion-key auth-key enc-key)
+
+(defun intro-points (inner-text)
+  "Split the decrypted inner plaintext into per-introduction-point sections and pull
+   the ntor onion-key and the base64 link specifiers (auth/enc keys are certs, parsed
+   later for the handshake).  Returns a list of INTRO-POINT."
+  (let ((points '()) (cur nil))
+    (with-input-from-string (in inner-text)
+      (loop for line = (read-line in nil) while line do
+        (let ((tk (remove "" (uiop:split-string line :separator '(#\Space #\Tab)) :test #'string=)))
+          (cond
+            ((string= (first tk) "introduction-point")
+             (when cur (push cur points))
+             (setf cur (make-intro-point :link-specs (u:base64-decode (second tk)))))
+            ((and cur (string= (first tk) "onion-key") (string= (second tk) "ntor"))
+             (setf (intro-point-onion-key cur) (u:base64-decode (third tk))))))))
+    (when cur (push cur points))
+    (nreverse points)))
