@@ -14,7 +14,7 @@
   (:export #:intro-for-relay #:establish-intro #:publish-descriptor #:publish-service
            #:service #:service-identity #:service-intros #:service-circuits
            #:service-period-num #:service-period-length
-           #:handle-introduce2 #:accept-stream #:run-service #:*num-intro-points*))
+           #:handle-introduce2 #:accept-stream #:run-service #:republish-service #:*num-intro-points*))
 
 (in-package #:cl-tor.hshost)
 
@@ -256,3 +256,18 @@
             (values (%make-service :identity identity :intros intros :circuits nil
                                    :period-num tp :period-length plen)
                     accepted)))))))
+
+(defun republish-service (service &key (revision (get-universal-time)))
+  "Re-build and re-upload SERVICE's descriptor for the CURRENT time period, REUSING
+   its already-established introduction points (no new circuits or threads — the intro
+   serve-loops keep running).  This is how a live service refreshes its descriptor
+   without leaking a fresh set of intro points every cycle.  Returns HSDirs accepted."
+  (let* ((relays (hsdir:relay-pool))
+         (id (service-identity service))
+         (pubkey (svc:hs-identity-pubkey id)))
+    (multiple-value-bind (va cur prev params) (hsdir:parse-consensus-header (dir:fetch-consensus))
+      (multiple-value-bind (tp plen srv) (hsdir:time-period-and-srv va cur prev params)
+        (setf (service-period-num service) tp (service-period-length service) plen)
+        (publish-descriptor pubkey
+                            (svc:build-descriptor id tp plen revision (service-intros service))
+                            relays tp plen srv)))))
