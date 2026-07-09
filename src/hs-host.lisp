@@ -18,6 +18,13 @@
 (in-package #:cl-tor.hshost)
 
 (defparameter *num-intro-points* 3 "How many introduction points to establish.")
+(defparameter *intro-establish-timeout* 30
+  "Seconds to wait for INTRO_ESTABLISHED before giving up on a relay (so a relay that
+   accepts the circuit but never ACKs can't strand its slot forever).")
+(defparameter *intro-lifetime* 3600
+  "Retire + replace an intro point after this many seconds — bounds a silently-dead
+   intro circuit (a blocking read that never returns) and rotates intros.  Active peer
+   connections run on their own read-loop threads, so this doesn't drop them.")
 
 (defconstant +r-establish-intro+ 32)
 (defconstant +r-intro-established+ 38)
@@ -93,7 +100,7 @@
   identity handler num-intros relays lock
   (live '())          ; intros currently established + serving (list of SVC:INTRO)
   (used '())          ; ed-ids of relays currently in use (avoid duplicate intro relays)
-  period-num period-length revision
+  period-num period-length next-period-num revision
   maint-thread)
 
 (defun %publish-all (service)
@@ -113,6 +120,7 @@
         (incf total (publish-descriptor id-pub (svc:build-descriptor id tp plen rev intros)
                                         relays tp plen srv))
         (multiple-value-bind (ntp nplen nsrv) (hsdir:next-time-period-and-srv va cur prev params)
+          (setf (service-next-period-num service) ntp)     ; NIL outside the overlap
           (when ntp
             (incf total (publish-descriptor id-pub (svc:build-descriptor id ntp nplen rev intros)
                                             relays ntp nplen nsrv))))))
@@ -132,13 +140,16 @@
      (lambda ()
        (unwind-protect
             (handler-case
-                (let ((circ (establish-intro relay intro (service-relays service))))
+                (let ((circ (sb-ext:with-timeout *intro-establish-timeout*
+                              (establish-intro relay intro (service-relays service)))))
                   (bt:with-lock-held ((service-lock service)) (push intro (service-live service)))
-                  (loop (let* ((rc (handle-introduce2 intro circ (service-identity service)
-                                                      (service-period-num service)
-                                                      (service-period-length service)))
-                               (sid (accept-stream rc)))
-                          (funcall (service-handler service) rc sid))))
+                  (sb-ext:with-timeout *intro-lifetime*   ; retire + replace on lifetime / dead read
+                    (loop (let* ((rc (handle-introduce2 intro circ (service-identity service)
+                                                        (service-period-num service)
+                                                        (service-period-length service)
+                                                        (service-next-period-num service)))
+                                 (sid (accept-stream rc)))
+                            (funcall (service-handler service) rc sid)))))
               (serious-condition (e) (format *error-output* "~&[hs-host] intro thread: ~a~%" e)))
          (bt:with-lock-held ((service-lock service))     ; dead intro: deregister + free the relay
            (setf (service-live service) (remove intro (service-live service))
@@ -186,10 +197,12 @@
   (multiple-value-bind (ip port rsa ed) (%parse-link-specs link-specs)
     (dir::make-relay :ip ip :or-port port :rsa-id rsa :ed-id ed :ntor-key ntor-key)))
 
-(defun handle-introduce2 (intro intro-circ identity period-num period-length)
+(defun handle-introduce2 (intro intro-circ identity period-num period-length &optional next-period-num)
   "Block on INTRO-CIRC for an INTRODUCE2, decrypt it (service hs-ntor), then build a
    circuit to the client's rendezvous point, send RENDEZVOUS1, and splice the client
    on as a SHA3/AES-256 hop (forward/backward keys swapped — we're the responder).
+   Tries PERIOD-NUM's subcredential and, if given, NEXT-PERIOD-NUM's — so a client that
+   found us via the next-period descriptor across the rotation still introduces.
    Returns the end-to-end circuit, ready for ACCEPT-STREAM."
   (let ((cell (loop (multiple-value-bind (hop rcmd rsid len data) (circ:recv-relay intro-circ)
                       (declare (ignore hop rsid len))
@@ -204,15 +217,19 @@
            (b (svc:intro-enc-seed intro)) (bigb (svc:intro-enc-pub intro))
            (auth-pub (ed:secret-to-public (svc:intro-auth-seed intro)))
            (id-pub (svc:hs-identity-pubkey identity))
-           (blinded (ed:blind-public-key id-pub period-num period-length))
-           (subcred (ed:subcredential id-pub blinded))
            (protoid (u:ascii->bytes +hs-ntor-protoid+))
-           ;; service intro handshake: EXP(X,b) | AUTH_KEY | X | B | PROTOID
-           (secret-input (u:cat (c:x25519 b xpub) auth-pub xpub bigb protoid))
-           (info (u:cat (%tweak ":hs_key_expand") subcred))
-           (keys (ed:shake256 (u:cat secret-input (%tweak ":hs_key_extract") info) 64))
-           (enc-key (subseq keys 0 32)) (mac-key (subseq keys 32 64)))
-      (unless (equalp mac-recv (%mac mac-key head))
+           ;; service intro handshake: EXP(X,b) | AUTH_KEY | X | B | PROTOID (period-independent)
+           (secret-input (u:cat (c:x25519 b xpub) auth-pub xpub bigb protoid)))
+      (flet ((keys-for (pn)
+               "The ENC key if the INTRODUCE2 MAC verifies under period PN's subcredential."
+               (let* ((blinded (ed:blind-public-key id-pub pn period-length))
+                      (subcred (ed:subcredential id-pub blinded))
+                      (info (u:cat (%tweak ":hs_key_expand") subcred))
+                      (keys (ed:shake256 (u:cat secret-input (%tweak ":hs_key_extract") info) 64)))
+                 (when (equalp mac-recv (%mac (subseq keys 32 64) head)) (subseq keys 0 32)))))
+      (let ((enc-key (or (keys-for period-num)
+                         (and next-period-num (keys-for next-period-num)))))
+      (unless enc-key
         (error "hs-host: INTRODUCE2 MAC mismatch"))
       (let* ((plain (c:ctr-apply (c:aes128-ctr-cipher enc-key (u:octets 16)) enc-data))
              (cookie (subseq plain 0 20))
@@ -239,7 +256,7 @@
         (setf (circ:circuit-hops rend-circ)
               (append (circ:circuit-hops rend-circ)
                       (list (rc:make-hs-hop nil kb kf db df))))
-        rend-circ))))
+        rend-circ))))))
 
 (defun accept-stream (circ)
   "On a connected rendezvous CIRC, wait for the client's RELAY_BEGIN and reply
