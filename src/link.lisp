@@ -20,11 +20,7 @@
 (defvar *debug-certs* nil "When true, print why cert validation failed.")
 
 (defstruct (link (:constructor %make-link))
-  relay sock stream ctx version circid-len validated my-apparent-addr)
-
-(defconstant +tls1.2-version+ #x0303
-  "Pin Tor links to TLS 1.2: TLS 1.3 mid-stream KeyUpdate desyncs cl+ssl's
-gray-stream read path under load (decryption/bad-record-mac).")
+  relay sock stream conn version circid-len validated my-apparent-addr)
 
 (defun send-cell (link cmd payload)
   (cell:write-cell (link-stream link) (link-circid-len link) 0 cmd payload))
@@ -35,7 +31,7 @@ gray-stream read path under load (decryption/bad-record-mac).")
 (defun close-link (link)
   (ignore-errors (close (link-stream link)))
   (ignore-errors (usocket:socket-close (link-sock link)))
-  (when (link-ctx link) (ignore-errors (cl+ssl:ssl-ctx-free (link-ctx link))))
+  (when (link-conn link) (ignore-errors (seal:tls-close (link-conn link))))
   link)
 
 ;;; ---- VERSIONS -----------------------------------------------------------
@@ -148,26 +144,37 @@ matched to the consensus RSA id.  Returns the Ed25519 identity, or signals."
 
 ;;; ---- connect ------------------------------------------------------------
 
-(defvar *tls-setup-lock* (bt:make-lock "cl+ssl-setup")
-  "Serializes cl+ssl context + client-stream CREATION.  cl+ssl's global init /
-   context setup mutates process-global OpenSSL state that races with concurrent
-   creation (corrupting in-flight streams — 'wrong version number' / GCM failures)
-   when the onion service builds circuits from several threads at once.  I/O on an
-   already-built stream is not locked.")
+(defun %seal-transport (sock)
+  "A seal TLS transport over an already-connected usocket SOCK, so cl-tor keeps owning
+   the socket — closing it still unblocks a reader parked in a cell read, exactly as
+   before (the gray-stream / socks close paths are unchanged)."
+  (let* ((bsd (usocket:socket sock))
+         (fd (sb-bsd-sockets:socket-file-descriptor bsd)))
+    (seal::%make-transport
+     :sender (lambda (bytes)
+               (let ((buf (coerce bytes '(simple-array (unsigned-byte 8) (*)))))
+                 (sb-bsd-sockets:socket-send bsd buf (length buf)) t))
+     :receiver (lambda ()
+                 (when (sb-sys:wait-until-fd-usable fd :input 30)
+                   (let ((buf (make-array 16384 :element-type '(unsigned-byte 8))))
+                     (handler-case
+                         (multiple-value-bind (data len) (sb-bsd-sockets:socket-receive bsd buf nil)
+                           (declare (ignore data))
+                           (when (and len (plusp len)) (subseq buf 0 len)))
+                       (sb-bsd-sockets:socket-error () nil)))))
+     :closer (lambda () (ignore-errors (usocket:socket-close sock))))))
 
 (defun connect-link (relay &key (timeout 20))
-  "Open and complete a link handshake to RELAY (a dir:relay).  Returns a LINK."
+  "Open and complete a link handshake to RELAY (a dir:relay).  Returns a LINK.  The TLS
+   is pure Common Lisp via seal (no OpenSSL / FFI); relays' self-signed certs are not
+   CA-checked (:verify nil) — Tor binds identity through the CERTS cell instead."
   (let* ((ip (dir:relay-ip relay)) (port (dir:relay-or-port relay))
          (sock (usocket:socket-connect ip port :element-type '(unsigned-byte 8)
                                                :timeout timeout))
-         (ctx (bt:with-lock-held (*tls-setup-lock*)
-                (let ((c (cl+ssl:make-context :verify-mode cl+ssl:+ssl-verify-none+)))
-                  (cl+ssl::ssl-ctx-set-max-proto-version c +tls1.2-version+) c)))
-         (tls (bt:with-lock-held (*tls-setup-lock*)
-                (cl+ssl:with-global-context (ctx :auto-free-p nil)
-                  (cl+ssl:make-ssl-client-stream (usocket:socket-stream sock)
-                                                 :verify nil :hostname ip))))
-         (link (%make-link :relay relay :sock sock :stream tls :ctx ctx :circid-len 2)))
+         (conn (seal:connect ip port :verify nil :timeout timeout
+                                     :transport (%seal-transport sock)))
+         (tls (seal:make-tls-stream conn))
+         (link (%make-link :relay relay :sock sock :stream tls :conn conn :circid-len 2)))
     (handler-case
         (progn
           ;; 1. VERSIONS exchange (2-byte circ ids on these cells).
@@ -193,8 +200,8 @@ matched to the consensus RSA id.  Returns the Ed25519 identity, or signals."
                   ((= cmd cell:+vpadding+))               ; ignore padding
                   (t (error "link: unexpected cell ~d during handshake" cmd)))))
             ;; 3. Validate the relay's Ed25519 cert chain against the TLS cert.
-            (let* ((x509 (cl+ssl:ssl-stream-x509-certificate tls))
-                   (fp (and x509 (cl+ssl:certificate-fingerprint x509 :sha256))))
+            (let* ((leaf (first (seal:tls-connection-peer-certificates conn)))
+                   (fp (and leaf (c:sha256 (seal:certificate-raw leaf)))))
               (setf (link-validated link)
                     (and certs fp
                          (handler-case

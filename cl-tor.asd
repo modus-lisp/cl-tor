@@ -9,7 +9,7 @@
   :license "MIT"
   :depends-on ("ironclad"            ; crypto primitives (SHA-1/256, HMAC, AES-CTR, X25519, Ed25519, RSA)
                "usocket"             ; TCP to relay ORPorts + directory HTTP
-               "cl+ssl"              ; the TLS link layer
+               "seal"               ; pure-CL TLS 1.3 link layer (no OpenSSL/FFI)
                "chipz"               ; zlib inflate (directory documents are compressed)
                "bordeaux-threads")   ; per-circuit read loops
   :serial t
