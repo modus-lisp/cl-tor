@@ -58,6 +58,22 @@
                       (vector-push-extend (logand (ash acc (- bits)) #xff) out)))
     (coerce out '(simple-array (unsigned-byte 8) (*)))))
 
+(defun base64-encode (bytes &key (pad t))
+  "Encode BYTES as standard base64 (with padding unless :PAD NIL)."
+  (let ((out (make-string-output-stream)) (b (cat bytes)))
+    (loop for i from 0 below (length b) by 3
+          for n = (- (length b) i)
+          do (let ((x (logior (ash (aref b i) 16)
+                              (if (> n 1) (ash (aref b (+ i 1)) 8) 0)
+                              (if (> n 2) (aref b (+ i 2)) 0))))
+               (write-char (char +b64-alphabet+ (ldb (byte 6 18) x)) out)
+               (write-char (char +b64-alphabet+ (ldb (byte 6 12) x)) out)
+               (if (> n 1) (write-char (char +b64-alphabet+ (ldb (byte 6 6) x)) out)
+                   (when pad (write-char #\= out)))
+               (if (> n 2) (write-char (char +b64-alphabet+ (ldb (byte 6 0) x)) out)
+                   (when pad (write-char #\= out)))))
+    (get-output-stream-string out)))
+
 ;;; ---- big-endian integer framing (Tor cells are big-endian) --------------
 
 (defun u8  (n) (octets 1 :initial-element (logand n #xff)))

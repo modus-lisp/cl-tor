@@ -31,7 +31,8 @@
      (:file "socks")      ; local SOCKS5 proxy onto fresh circuits
      (:file "hs-dir")      ; v3 onion HSDir hash ring (time period, SRV, indices)
      (:file "hs-desc")     ; v3 descriptor 2-layer decrypt + intro points
-     (:file "hs-intro")))) ; hs-ntor + ESTABLISH_RENDEZVOUS + INTRODUCE1
+     (:file "hs-intro")    ; hs-ntor + ESTABLISH_RENDEZVOUS + INTRODUCE1
+     (:file "hs-service")))) ; onion SERVICE: build/sign/encrypt the descriptor
   :in-order-to ((test-op (test-op "cl-tor/test"))))
 
 (defsystem "cl-tor/test"

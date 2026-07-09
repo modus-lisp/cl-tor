@@ -7,7 +7,7 @@
 (defpackage #:cl-tor.util
   (:use #:cl)
   (:export
-   #:octets #:bytes->hex #:hex->bytes #:ascii->bytes #:cat #:base64-decode
+   #:octets #:bytes->hex #:hex->bytes #:ascii->bytes #:cat #:base64-decode #:base64-encode
    #:u8 #:u16be #:u32be #:put-u8 #:put-u16be #:put-u32be #:ipv4->bytes
    #:read-u16be #:read-u32be #:subv #:bytes= #:bytes->int #:int->bytes))
 
