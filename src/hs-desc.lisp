@@ -68,21 +68,45 @@
 
 ;;; --- introduction points ----------------------------------------------------
 
-(defstruct intro-point link-specs onion-key auth-key enc-key)
+(defstruct intro-point
+  link-specs      ; raw link specifiers of the intro-point RELAY (NSPEC|{type,len,spec}...)
+  onion-key       ; that relay's ntor key (to build a circuit to it)
+  auth-key        ; intro AUTH_KEY (ed25519, from the auth-key cert's certified key)
+  enc-key)        ; the service's ntor enc key B for this intro (hs-ntor)
+
+(defun %cert-certified-key (cert-bytes)
+  "The 32-byte CERTIFIED_KEY of a Tor ed25519 cert (cert-spec): version(1) type(1)
+   expiration(4) key-type(1) then CERTIFIED_KEY(32)."
+  (subseq cert-bytes 7 39))
 
 (defun intro-points (inner-text)
-  "Split the decrypted inner plaintext into per-introduction-point sections and pull
-   the ntor onion-key and the base64 link specifiers (auth/enc keys are certs, parsed
-   later for the handshake).  Returns a list of INTRO-POINT."
-  (let ((points '()) (cur nil))
-    (with-input-from-string (in inner-text)
-      (loop for line = (read-line in nil) while line do
-        (let ((tk (remove "" (uiop:split-string line :separator '(#\Space #\Tab)) :test #'string=)))
+  "Parse the decrypted inner plaintext into INTRO-POINTs: the relay link specifiers,
+   its ntor onion-key, the intro AUTH_KEY (from its ed25519 cert), and the service's
+   ntor enc-key B — everything the introduction handshake needs."
+  (let ((points '()) (cur nil) (pending-cert-for nil) (cert-acc nil))
+    (flet ((flush-cert ()
+             (when (and pending-cert-for cert-acc cur)
+               (let ((cert (u:base64-decode (apply #'concatenate 'string (nreverse cert-acc)))))
+                 (when (eq pending-cert-for :auth)
+                   (setf (intro-point-auth-key cur) (%cert-certified-key cert))))
+               (setf pending-cert-for nil cert-acc nil))))
+      (with-input-from-string (in inner-text)
+        (loop for line = (read-line in nil) while line do
           (cond
-            ((string= (first tk) "introduction-point")
-             (when cur (push cur points))
-             (setf cur (make-intro-point :link-specs (u:base64-decode (second tk)))))
-            ((and cur (string= (first tk) "onion-key") (string= (second tk) "ntor"))
-             (setf (intro-point-onion-key cur) (u:base64-decode (third tk))))))))
-    (when cur (push cur points))
-    (nreverse points)))
+            ((search "-----BEGIN ED25519 CERT-----" line))                 ; skip marker
+            ((search "-----END ED25519 CERT-----" line) (flush-cert))
+            (pending-cert-for (push line cert-acc))                         ; accumulate cert body
+            (t (let ((tk (remove "" (uiop:split-string line :separator '(#\Space #\Tab)) :test #'string=)))
+                 (cond
+                   ((string= (first tk) "introduction-point")
+                    (when cur (push cur points))
+                    (setf cur (make-intro-point :link-specs (u:base64-decode (second tk)))))
+                   ((and cur (string= (first tk) "onion-key") (string= (second tk) "ntor"))
+                    (setf (intro-point-onion-key cur) (u:base64-decode (third tk))))
+                   ((and cur (string= (first tk) "enc-key") (string= (second tk) "ntor"))
+                    (setf (intro-point-enc-key cur) (u:base64-decode (third tk))))
+                   ((and cur (string= (first tk) "auth-key")) (setf pending-cert-for :auth))
+                   ((and cur (string= (first tk) "enc-key-cert")) (setf pending-cert-for :enc-cert))))))))
+      (flush-cert)
+      (when cur (push cur points))
+      (nreverse points))))
