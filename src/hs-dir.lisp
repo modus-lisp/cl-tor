@@ -13,7 +13,7 @@
                     (#:circ #:cl-tor.circuit) (#:strm #:cl-tor.stream)
                     (#:rc #:cl-tor.relay-crypto) (#:link #:cl-tor.link)
                     (#:guard #:cl-tor.guard))
-  (:export #:parse-consensus-header #:time-period-and-srv
+  (:export #:parse-consensus-header #:time-period-and-srv #:next-time-period-and-srv
            #:hsdir-index #:hs-index #:responsible-hsdirs
            #:onion->pubkey #:pubkey->onion #:fetch-descriptor
            #:build-circuit-to #:relay-pool #:hsdir-pool #:post-over-circuit
@@ -79,6 +79,19 @@
     (multiple-value-bind (s mi hour) (decode-universal-time valid-after 0)
       (declare (ignore s mi))
       (values tp period-length (if (>= hour 12) srv-current srv-previous)))))
+
+(defun next-time-period-and-srv (valid-after srv-current srv-previous params)
+  "During the OVERLAP [00:00,12:00 UTC) a service should ALSO publish for the NEXT time
+   period, so clients find its descriptor across the 12:00 rotation.  In that window the
+   next period is current-tp+1 and its SRV is srv-current (both known); returns
+   (values next-period-num period-length srv-current).  Outside the overlap the next
+   period's SRV isn't known yet — returns NIL (no second descriptor)."
+  (multiple-value-bind (tp plen srv) (time-period-and-srv valid-after srv-current srv-previous params)
+    (declare (ignore srv))
+    (multiple-value-bind (s mi hour) (decode-universal-time valid-after 0)
+      (declare (ignore s mi))
+      (when (< hour 12)
+        (values (1+ tp) plen srv-current)))))
 
 ;;; --- the hash ring ----------------------------------------------------------
 

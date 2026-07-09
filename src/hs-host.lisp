@@ -11,9 +11,8 @@
                     (#:dir #:cl-tor.directory) (#:circ #:cl-tor.circuit) (#:link #:cl-tor.link)
                     (#:rc #:cl-tor.relay-crypto) (#:hsdir #:cl-tor.hsdir) (#:svc #:cl-tor.hsservice)
                     (#:bt #:bordeaux-threads))
-  (:export #:intro-for-relay #:establish-intro #:publish-descriptor #:publish-service
-           #:service #:service-identity #:service-intros #:service-circuits
-           #:service-period-num #:service-period-length
+  (:export #:intro-for-relay #:establish-intro #:publish-descriptor
+           #:service #:service-identity #:service-live #:service-period-num #:service-period-length
            #:handle-introduce2 #:accept-stream #:run-service #:republish-service #:*num-intro-points*))
 
 (in-package #:cl-tor.hshost)
@@ -91,35 +90,77 @@
 ;;; --- driver -----------------------------------------------------------------
 
 (defstruct (service (:constructor %make-service))
-  identity intros circuits period-num period-length)
+  identity handler num-intros relays lock
+  (live '())          ; intros currently established + serving (list of SVC:INTRO)
+  (used '())          ; ed-ids of relays currently in use (avoid duplicate intro relays)
+  period-num period-length revision
+  maint-thread)
 
-(defun publish-service (identity &key (revision 1) (num-intros *num-intro-points*))
-  "Bring IDENTITY's onion service online: establish NUM-INTROS introduction points,
-   build + upload the descriptor.  Returns a SERVICE (intro circuits kept open) and
-   the number of HSDirs that accepted the upload as a second value."
-  (let* ((relays (hsdir:relay-pool))
-         (consensus (dir:fetch-consensus))
-         (pubkey (svc:hs-identity-pubkey identity)))
-    (multiple-value-bind (va cur prev params) (hsdir:parse-consensus-header consensus)
+(defun %publish-all (service)
+  "Publish SERVICE's descriptor for the CURRENT time period, plus — during the overlap
+   [00:00,12:00 UTC) — the NEXT period too, so clients still find us across the 12:00
+   rotation.  Uses the CURRENTLY-LIVE intro points.  Returns HSDirs accepted (summed)."
+  (let* ((id (service-identity service))
+         (id-pub (svc:hs-identity-pubkey id))
+         (relays (service-relays service))
+         (rev (service-revision service))
+         (intros (bt:with-lock-held ((service-lock service)) (copy-list (service-live service))))
+         (total 0))
+    (when (null intros) (return-from %publish-all 0))
+    (multiple-value-bind (va cur prev params) (hsdir:parse-consensus-header (dir:fetch-consensus))
       (multiple-value-bind (tp plen srv) (hsdir:time-period-and-srv va cur prev params)
-        ;; establish intro points at distinct Stable/Fast relays
-        (let ((intros '()) (circuits '()) (used '()))
-          (loop for attempt from 1 to (* 6 num-intros)
-                while (< (length intros) num-intros) do
-            (let ((relay (dir:enrich-relay (dir:pick-relay :flag "Stable" :relays relays))))
-              (when (and (dir:relay-ntor-key relay) (dir:relay-ed-id relay)
-                         (not (member (dir:relay-ed-id relay) used :test #'equalp)))
-                (let ((intro (intro-for-relay relay)))
-                  (handler-case
-                      (let ((circ (establish-intro relay intro relays)))
-                        (push (dir:relay-ed-id relay) used)
-                        (push intro intros) (push circ circuits))
-                    (error () nil))))))          ; skip a relay that refuses; try another
-          (let* ((desc (svc:build-descriptor identity tp plen revision (reverse intros)))
-                 (accepted (publish-descriptor pubkey desc relays tp plen srv)))
-            (values (%make-service :identity identity :intros (reverse intros)
-                                   :circuits (reverse circuits) :period-num tp :period-length plen)
-                    accepted)))))))
+        (setf (service-period-num service) tp (service-period-length service) plen)
+        (incf total (publish-descriptor id-pub (svc:build-descriptor id tp plen rev intros)
+                                        relays tp plen srv))
+        (multiple-value-bind (ntp nplen nsrv) (hsdir:next-time-period-and-srv va cur prev params)
+          (when ntp
+            (incf total (publish-descriptor id-pub (svc:build-descriptor id ntp nplen rev intros)
+                                            relays ntp nplen nsrv))))))
+    total))
+
+(defun %spawn-intro (service)
+  "Establish + serve one introduction point in its own thread, keeping it registered in
+   SERVICE's LIVE set for the life of its circuit.  When the circuit dies the thread
+   deregisters it (and frees its relay) so the maintenance loop replenishes it."
+  (let ((relay (%pick-intro-relay (service-relays service)
+                                  (bt:with-lock-held ((service-lock service))
+                                    (copy-list (service-used service))))))
+    (unless relay (return-from %spawn-intro nil))       ; no fresh relay right now
+   (let ((intro (intro-for-relay relay)) (ed (dir:relay-ed-id relay)))
+    (bt:with-lock-held ((service-lock service)) (push ed (service-used service)))
+    (bt:make-thread
+     (lambda ()
+       (unwind-protect
+            (handler-case
+                (let ((circ (establish-intro relay intro (service-relays service))))
+                  (bt:with-lock-held ((service-lock service)) (push intro (service-live service)))
+                  (loop (let* ((rc (handle-introduce2 intro circ (service-identity service)
+                                                      (service-period-num service)
+                                                      (service-period-length service)))
+                               (sid (accept-stream rc)))
+                          (funcall (service-handler service) rc sid))))
+              (serious-condition (e) (format *error-output* "~&[hs-host] intro thread: ~a~%" e)))
+         (bt:with-lock-held ((service-lock service))     ; dead intro: deregister + free the relay
+           (setf (service-live service) (remove intro (service-live service))
+                 (service-used service) (remove ed (service-used service) :test #'equalp)))))
+     :name "hs-host intro"))))
+
+(defun %live-count (service)
+  (bt:with-lock-held ((service-lock service)) (length (service-live service))))
+
+(defun %inflight-count (service)
+  "Intro points spawned and not yet dead (a relay is reserved in USED from spawn until
+   the thread exits) — counting these, not just the established ones, keeps the
+   maintenance loop from over-spawning replacements while intros are still connecting."
+  (bt:with-lock-held ((service-lock service)) (length (service-used service))))
+
+(defun %maintain-intros (service)
+  "Keep SERVICE at NUM-INTROS intro points, spawning replacements for any whose circuit
+   died — so a service stays reachable across relay churn without a restart."
+  (loop
+    (dotimes (i (max 0 (- (service-num-intros service) (%inflight-count service))))
+      (ignore-errors (%spawn-intro service)))
+    (sleep 30)))
 
 ;;; --- INTRODUCE2 + rendezvous (service side, S4/S5) --------------------------
 
@@ -210,8 +251,10 @@
             (return sid)))))
 
 (defun %pick-intro-relay (relays used)
-  "Pick a fresh Stable relay (enriched, distinct from USED ed-ids) for an intro point."
-  (loop for r = (dir:enrich-relay (dir:pick-relay :flag "Stable" :relays relays))
+  "Pick a fresh Stable relay (enriched, distinct from USED ed-ids) for an intro point;
+   NIL if none turns up in a bounded number of tries."
+  (loop repeat 40
+        for r = (dir:enrich-relay (dir:pick-relay :flag "Stable" :relays relays))
         when (and (dir:relay-ntor-key r) (dir:relay-ed-id r)
                   (not (member (dir:relay-ed-id r) used :test #'equalp)))
           do (return r)))
@@ -223,51 +266,26 @@
    the SBCL socket/thread-affinity rule) and loops handling introductions, calling
    (HANDLER circ sid) per inbound end-to-end stream.  Publishes the descriptor once a
    quorum of intro points is up.  Returns (values SERVICE hsdirs-accepted)."
-  (let* ((relays (hsdir:relay-pool))
-         (consensus (dir:fetch-consensus))
-         (id-pub (svc:hs-identity-pubkey identity))
-         (established '()) (lock (bt:make-lock "hs-service")) (used '()))
-    (multiple-value-bind (va cur prev params) (hsdir:parse-consensus-header consensus)
-      (multiple-value-bind (tp plen srv) (hsdir:time-period-and-srv va cur prev params)
-        (dotimes (i num-intros)
-          (let* ((relay (%pick-intro-relay relays used))
-                 (intro (intro-for-relay relay)))
-            (push (dir:relay-ed-id relay) used)
-            (bt:make-thread
-             (lambda ()
-               (handler-case
-                   (let ((circ (establish-intro relay intro relays)))   ; circuit built IN this thread
-                     (bt:with-lock-held (lock) (push intro established))
-                     (loop                                              ; serve introductions forever
-                       (let* ((rc (handle-introduce2 intro circ identity tp plen))
-                              (sid (accept-stream rc)))
-                         (funcall handler rc sid))))
-                 (serious-condition (e)
-                   (format *error-output* "~&[hs-host] intro thread: ~a~%" e))))
-             :name "hs-host intro")))
-        ;; wait for a quorum of intro points, then build + publish the descriptor
-        (loop repeat 120
-              until (bt:with-lock-held (lock) (>= (length established) (max 1 (ceiling num-intros 2))))
-              do (sleep 1))
-        (let ((intros (bt:with-lock-held (lock) (copy-list established))))
-          (when (null intros) (error "hs-host: no intro points established"))
-          (let* ((desc (svc:build-descriptor identity tp plen revision intros))
-                 (accepted (publish-descriptor id-pub desc relays tp plen srv)))
-            (values (%make-service :identity identity :intros intros :circuits nil
-                                   :period-num tp :period-length plen)
-                    accepted)))))))
-
-(defun republish-service (service &key (revision (get-universal-time)))
-  "Re-build and re-upload SERVICE's descriptor for the CURRENT time period, REUSING
-   its already-established introduction points (no new circuits or threads — the intro
-   serve-loops keep running).  This is how a live service refreshes its descriptor
-   without leaking a fresh set of intro points every cycle.  Returns HSDirs accepted."
-  (let* ((relays (hsdir:relay-pool))
-         (id (service-identity service))
-         (pubkey (svc:hs-identity-pubkey id)))
+  (let ((service (%make-service :identity identity :handler handler :num-intros num-intros
+                                :relays (hsdir:relay-pool) :lock (bt:make-lock "hs-service")
+                                :revision revision)))
+    ;; seed the current period so introductions can be decrypted before the first publish
     (multiple-value-bind (va cur prev params) (hsdir:parse-consensus-header (dir:fetch-consensus))
       (multiple-value-bind (tp plen srv) (hsdir:time-period-and-srv va cur prev params)
-        (setf (service-period-num service) tp (service-period-length service) plen)
-        (publish-descriptor pubkey
-                            (svc:build-descriptor id tp plen revision (service-intros service))
-                            relays tp plen srv)))))
+        (declare (ignore srv))
+        (setf (service-period-num service) tp (service-period-length service) plen)))
+    ;; the maintenance loop establishes the initial intros and keeps them at NUM-INTROS
+    (setf (service-maint-thread service)
+          (bt:make-thread (lambda () (%maintain-intros service)) :name "hs-host maintain"))
+    ;; wait for a quorum of LIVE intros, then publish (current + next period)
+    (loop repeat 120 until (>= (%live-count service) (max 1 (ceiling num-intros 2))) do (sleep 1))
+    (when (zerop (%live-count service)) (error "hs-host: no intro points established"))
+    (values service (%publish-all service))))
+
+(defun republish-service (service &key revision)
+  "Re-upload SERVICE's descriptor(s) for the current (and, in the overlap, next) time
+   period using its currently-LIVE intro points — refreshes the descriptor without
+   re-establishing intros.  Bumps the revision counter so HSDirs accept the update.
+   Returns HSDirs accepted."
+  (setf (service-revision service) (or revision (get-universal-time)))
+  (%publish-all service))
