@@ -31,7 +31,7 @@
    #:+onionskin-len+
    #:client-create #:client-finish
    #:server-handshake                ; for tests / running as a relay
-   #:circuit-keys #:circuit-keys-df #:circuit-keys-db
+   #:circuit-keys #:circuit-keys-df #:circuit-keys-db #:circuit-keys-kh
    #:circuit-keys-kf #:circuit-keys-kb #:keys-from-seed))
 
 (defpackage #:cl-tor.directory
@@ -71,7 +71,7 @@
   (:use #:cl)
   (:local-nicknames (#:u #:cl-tor.util) (#:c #:cl-tor.crypto) (#:n #:cl-tor.ntor))
   (:export
-   #:hop #:make-hop #:make-hs-hop #:hop-relay #:hop-kf #:hop-kb #:hop-df #:hop-db
+   #:hop #:make-hop #:make-hs-hop #:hop-relay #:hop-kf #:hop-kb #:hop-df #:hop-db #:hop-kh
    #:build-relay-body #:parse-relay-body #:recognized-and-valid #:hop-recv-digest
    #:+r-begin+ #:+r-data+ #:+r-end+ #:+r-connected+ #:+r-sendme+
    #:+r-extend2+ #:+r-extended2+ #:+r-drop+ #:+r-resolve+ #:+r-resolved+))

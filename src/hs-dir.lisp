@@ -14,7 +14,8 @@
                     (#:rc #:cl-tor.relay-crypto) (#:link #:cl-tor.link))
   (:export #:parse-consensus-header #:time-period-and-srv
            #:hsdir-index #:hs-index #:responsible-hsdirs
-           #:onion->pubkey #:fetch-descriptor
+           #:onion->pubkey #:pubkey->onion #:fetch-descriptor
+           #:build-circuit-to #:relay-pool #:hsdir-pool #:post-over-circuit
            #:*hsdir-n-replicas* #:*hsdir-spread-fetch*))
 
 (in-package #:cl-tor.hsdir)
@@ -135,6 +136,23 @@
                (vector-push-extend (logand (ash bits (- nbits)) #xff) out)))
     (coerce out '(simple-array (unsigned-byte 8) (*)))))
 
+(defun %base32-encode (bytes)
+  (let ((out (make-string-output-stream)) (bits 0) (nbits 0))
+    (loop for b across bytes do
+      (setf bits (logior (ash bits 8) b) nbits (+ nbits 8))
+      (loop while (>= nbits 5) do
+        (decf nbits 5)
+        (write-char (char +b32+ (logand (ash bits (- nbits)) 31)) out)))
+    (when (plusp nbits)
+      (write-char (char +b32+ (logand (ash bits (- 5 nbits)) 31)) out))
+    (get-output-stream-string out)))
+
+(defun pubkey->onion (pubkey)
+  "The v3 .onion address for a 32-byte Ed25519 identity PUBKEY (base32 of
+   PUBKEY | CHECKSUM(2) | VERSION(3), + \".onion\")."
+  (let ((ck (subseq (c:sha3-256 (u:cat (u:ascii->bytes ".onion checksum") pubkey #(3))) 0 2)))
+    (concatenate 'string (%base32-encode (u:cat pubkey ck #(3))) ".onion")))
+
 (defun onion->pubkey (onion)
   "Decode a v3 .onion address to its 32-byte Ed25519 identity public key.  Verifies
    the version byte and checksum = SHA3-256(\".onion checksum\" | pubkey | v)[:2]."
@@ -208,6 +226,33 @@
             (cond ((= rcmd rc:+r-data+) (loop for b across data do (vector-push-extend b out)))
                   ((= rcmd rc:+r-end+) (return)))))
     (%http-body (coerce out '(simple-array (unsigned-byte 8) (*))))))
+
+;;; --- public helpers reused by the SERVICE side (hs-host) --------------------
+
+(defun build-circuit-to (exit relays) (%build-circuit-to exit relays))
+(defun relay-pool () (%relays))
+(defun hsdir-pool (relays) (%hsdirs relays))
+
+(defun post-over-circuit (circ path body-bytes &key (sid 1))
+  "RELAY_BEGIN_DIR to the last hop, then HTTP/1.0 POST PATH with BODY-BYTES.  Returns
+   the response text (for status checking)."
+  (circ:send-relay circ +r-begin-dir+ sid #())
+  (loop (multiple-value-bind (hop rcmd rsid len data) (circ:recv-relay circ)
+          (declare (ignore hop len data))
+          (cond ((and (= rcmd rc:+r-connected+) (= rsid sid)) (return))
+                ((and (= rcmd rc:+r-end+) (= rsid sid)) (error "dir stream refused")))))
+  (strm:send-stream-data circ sid
+    (u:cat (u:ascii->bytes
+            (format nil "POST ~a HTTP/1.0~c~cContent-Type: application/octet-stream~c~cContent-Length: ~d~c~c~c~c"
+                    path #\Return #\Newline #\Return #\Newline (length body-bytes)
+                    #\Return #\Newline #\Return #\Newline))
+           body-bytes))
+  (let ((out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+    (loop (multiple-value-bind (hop rcmd rsid len data) (circ:recv-relay circ)
+            (declare (ignore hop rsid len))
+            (cond ((= rcmd rc:+r-data+) (loop for b across data do (vector-push-extend b out)))
+                  ((= rcmd rc:+r-end+) (return)))))
+    (map 'string #'code-char (coerce out '(simple-array (unsigned-byte 8) (*))))))
 
 (defun fetch-descriptor (onion)
   "Fetch the raw v3 descriptor text for ONION from a responsible HSDir over a fresh

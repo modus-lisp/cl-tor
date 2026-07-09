@@ -30,19 +30,21 @@
 (defconstant +g-len+ 32)                ; curve25519 element
 (defconstant +onionskin-len+ 84)        ; ID(20) | B(32) | X(32)
 (defconstant +reply-len+ 64)            ; Y(32) | AUTH(32)
-(defconstant +key-material-len+ 72)     ; Df(20)|Db(20)|Kf(16)|Kb(16)
+(defconstant +key-material-len+ 92)     ; Df(20)|Db(20)|Kf(16)|Kb(16)|KH(20)
 
 (defun h (msg tweak) (c:hmac-sha256 tweak msg))   ; H(x,t) = HMAC-SHA256(key=t, msg=x)
 
 (defstruct circuit-keys
-  "The four relay-cell keys derived for one hop."
-  (df nil) (db nil) (kf nil) (kb nil))
+  "The relay-cell keys derived for one hop, plus KH — the per-circuit binding nonce
+   (rend_circ_nonce), used by the onion SERVICE's ESTABLISH_INTRO MAC."
+  (df nil) (db nil) (kf nil) (kb nil) (kh nil))
 
 (defun keys-from-seed (key-seed)
-  "Expand KEY_SEED into a CIRCUIT-KEYS (Df|Db|Kf|Kb)."
+  "Expand KEY_SEED into a CIRCUIT-KEYS (Df|Db|Kf|Kb|KH)."
   (let ((k (c:hkdf-expand key-seed +m-expand+ +key-material-len+)))
     (make-circuit-keys :df (u:subv k 0 20) :db (u:subv k 20 40)
-                       :kf (u:subv k 40 56) :kb (u:subv k 56 72))))
+                       :kf (u:subv k 40 56) :kb (u:subv k 56 72)
+                       :kh (u:subv k 72 92))))
 
 (defun %finish (secret-input id b x y)
   "Shared tail: derive KEY_SEED + AUTH from SECRET-INPUT and the transcript."

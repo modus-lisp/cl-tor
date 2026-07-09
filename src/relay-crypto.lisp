@@ -26,7 +26,7 @@
 
 (defconstant +body-len+ 509)
 
-(defstruct (hop (:constructor %make-hop)) relay kf kb df db)
+(defstruct (hop (:constructor %make-hop)) relay kf kb df db kh)
 
 (defun %seeded-sha1 (seed)
   (let ((d (ironclad:make-digest :sha1))) (ironclad:update-digest d seed) d))
@@ -37,7 +37,8 @@
              :kf (c:aes128-ctr-cipher (n:circuit-keys-kf keys))
              :kb (c:aes128-ctr-cipher (n:circuit-keys-kb keys))
              :df (%seeded-sha1 (n:circuit-keys-df keys))
-             :db (%seeded-sha1 (n:circuit-keys-db keys))))
+             :db (%seeded-sha1 (n:circuit-keys-db keys))
+             :kh (n:circuit-keys-kh keys)))     ; KH for the service's ESTABLISH_INTRO MAC
 
 (defun %seeded-sha3-256 (seed)
   (let ((d (ironclad:make-digest :sha3/256))) (ironclad:update-digest d seed) d))
