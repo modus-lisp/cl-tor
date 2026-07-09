@@ -10,49 +10,22 @@
 (in-package #:cl-tor.socks)
 
 (defvar *relays* nil "Cached consensus relay list (loaded on first use).")
-(defvar *guard* nil "The persistent entry guard for this session.")
-
-(defun %guard-file () (merge-pathnames ".cl-tor/guard" (user-homedir-pathname)))
-
-(defun %load-guard-fp ()
-  (ignore-errors (with-open-file (f (%guard-file)) (read-line f nil))))
-
-(defun %save-guard-fp (hex)
-  (ignore-errors
-   (ensure-directories-exist (%guard-file))
-   (with-open-file (f (%guard-file) :direction :output
-                                    :if-exists :supersede :if-does-not-exist :create)
-     (write-line hex f))))
-
-(defun ensure-guard (relays)
-  "Return the persistent entry guard, restoring it from disk (or picking + saving
-a new one).  Reusing one guard across circuits is the basic entry-guard defense."
-  (or *guard*
-      (setf *guard*
-            (let ((saved (%load-guard-fp)))
-              (or (and saved
-                       (let ((r (find saved relays :test #'string=
-                                      :key (lambda (x) (u:bytes->hex (dir:relay-rsa-id x))))))
-                         (and r (dir:relay-has-flag r "Guard") (dir:relay-has-flag r "Running")
-                              (ignore-errors (dir:enrich-relay r)))))
-                  (let ((g (dir:pick-relay :flag "Guard" :relays relays)))
-                    (%save-guard-fp (u:bytes->hex (dir:relay-rsa-id g)))
-                    g))))))
 
 (defun build-fresh-circuit (&key (tries 6) (port 443))
-  "Build a 3-hop circuit through the persistent guard (exit permitting PORT),
-retrying past relay churn; drop the guard if it proves unusable."
+  "Build a 3-hop circuit through a persistent entry guard (exit permitting PORT),
+retrying past relay churn; a guard that won't connect is dropped from the set."
   (unless *relays* (setf *relays* (dir:consensus-relays)))
   (loop for i from 1 to tries
+        for guard = (guard:pick-guard *relays*)
         for circ = (ignore-errors
                     (destructuring-bind (g m e)
-                        (dir:pick-path *relays* :port port :guard (ensure-guard *relays*))
-                      (let ((lk (link:connect-link g)))
+                        (dir:pick-path *relays* :port port :guard guard)
+                      (let ((lk (handler-case (link:connect-link g)
+                                  (error (err) (guard:guard-failed g) (error err)))))
                         (handler-case (circ:build-circuit lk m e)
                           (error (err) (link:close-link lk) (error err))))))
         when circ return circ
-        finally (setf *guard* nil)            ; guard may be down — re-pick next time
-                (error "could not build a circuit after ~d tries" tries)))
+        finally (error "could not build a circuit after ~d tries" tries)))
 
 ;;; ---- SOCKS5 wire (RFC 1928) ---------------------------------------------
 

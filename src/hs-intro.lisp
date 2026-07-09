@@ -12,7 +12,7 @@
   (:local-nicknames (#:u #:cl-tor.util) (#:c #:cl-tor.crypto) (#:ed #:cl-tor.ed25519)
                     (#:dir #:cl-tor.directory) (#:circ #:cl-tor.circuit) (#:link #:cl-tor.link)
                     (#:rc #:cl-tor.relay-crypto) (#:strm #:cl-tor.stream)
-                    (#:hsdir #:cl-tor.hsdir) (#:desc #:cl-tor.hsdesc))
+                    (#:hsdir #:cl-tor.hsdir) (#:desc #:cl-tor.hsdesc) (#:guard #:cl-tor.guard))
   (:export #:introduce #:rend-complete #:connect-onion #:*hs-ntor-protoid*))
 
 (in-package #:cl-tor.hs-intro)
@@ -63,13 +63,15 @@
 ;;; --- circuits ---------------------------------------------------------------
 
 (defun %build-circ-to (exit relays)
-  "3-hop circuit guard|middle|EXIT (a chosen, ntor-keyed relay)."
-  (let* ((guard (dir:enrich-relay (dir:pick-relay :flag "Guard" :relays relays)))
+  "3-hop circuit guard|middle|EXIT (a chosen, ntor-keyed relay), entering through a
+   persistent entry guard."
+  (let* ((guard (guard:pick-guard relays))
          (middle (loop for m = (dir:pick-relay :relays relays)
                        until (and (not (equalp (dir:relay-rsa-id m) (dir:relay-rsa-id guard)))
                                   (not (equalp (dir:relay-rsa-id m) (dir:relay-rsa-id exit))))
                        finally (return (dir:enrich-relay m))))
-         (lk (link:connect-link guard)))
+         (lk (handler-case (link:connect-link guard)
+               (error (e) (guard:guard-failed guard) (error e)))))   ; guard down -> drop it
     (handler-case (circ:build-circuit lk middle exit)
       (error (e) (ignore-errors (link:close-link lk)) (error e)))))
 

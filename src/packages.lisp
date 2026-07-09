@@ -94,10 +94,15 @@
                     (#:circ #:cl-tor.circuit))
   (:export #:begin-stream #:send-stream-data #:end-stream))
 
+(defpackage #:cl-tor.guard
+  (:use #:cl)
+  (:local-nicknames (#:u #:cl-tor.util) (#:dir #:cl-tor.directory) (#:bt #:bordeaux-threads))
+  (:export #:pick-guard #:guard-failed #:reset-guards #:*num-guards* #:*guard-lifetime*))
+
 (defpackage #:cl-tor.socks
   (:use #:cl)
   (:local-nicknames (#:u #:cl-tor.util) (#:rc #:cl-tor.relay-crypto)
                     (#:dir #:cl-tor.directory) (#:link #:cl-tor.link)
                     (#:circ #:cl-tor.circuit) (#:strm #:cl-tor.stream)
-                    (#:bt #:bordeaux-threads))
+                    (#:guard #:cl-tor.guard) (#:bt #:bordeaux-threads))
   (:export #:run-proxy #:build-fresh-circuit))

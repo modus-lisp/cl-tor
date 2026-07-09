@@ -23,6 +23,7 @@
      (:file "ed25519")    ; Ed25519 group arithmetic + v3 onion key blinding
      (:file "ntor")       ; ntor-curve25519-sha256-1 circuit handshake + key derivation
      (:file "directory")  ; minimal directory bootstrap: consensus + microdescs + selection
+     (:file "guard")      ; persistent entry-guard set + rotation (shared by socks + onion)
      (:file "cell")       ; cell framing (fixed + variable)
      (:file "link")       ; TLS link handshake: VERSIONS/CERTS/NETINFO + cert validation
      (:file "relay-crypto") ; per-hop onion crypto (AES-CTR layers + SHA-1 digests)
