@@ -109,37 +109,48 @@
 
 ;;; --- driver -----------------------------------------------------------------
 
+(defun %teardown (circ)
+  "Destroy CIRC and close its link (best-effort)."
+  (when circ
+    (ignore-errors (circ:destroy-circuit circ))
+    (ignore-errors (link:close-link (circ:circuit-link circ)))))
+
 (defun introduce (intro-point subcred relays)
   "Establish a rendezvous point, then send INTRODUCE1 for INTRO-POINT.  Returns a plist
    with :status (INTRODUCE_ACK status, 0 = success), and — for H5 — :rend-circ,
-   :cookie, :x, :xpub, :auth-key, :enc-key so the rendezvous handshake can complete."
-  (let* ((rp (dir:enrich-relay (dir:pick-relay :flag "Fast" :relays relays)))
-         (rp-link-specs (%relay-link-specs rp))
-         (cookie (c:random-bytes 20))
-         (rend-circ (%build-circ-to rp relays)))
-    ;; ESTABLISH_RENDEZVOUS on the rendezvous circuit
-    (circ:send-relay rend-circ +r-establish-rendezvous+ 0 cookie)
-    (loop (multiple-value-bind (hop rcmd rsid len data) (circ:recv-relay rend-circ)
-            (declare (ignore hop rsid len data))
-            (when (= rcmd +r-rendezvous-established+) (return))))
-    ;; INTRODUCE1 via a separate circuit to the intro point
-    (let ((intro-circ (%build-circ-to (%intro-relay intro-point) relays)))
-      (multiple-value-bind (cell xpub x)
-          (%build-introduce1 (desc:intro-point-auth-key intro-point) cookie
-                             (dir:relay-ntor-key rp) rp-link-specs
-                             (desc:intro-point-enc-key intro-point) subcred)
-        (circ:send-relay intro-circ +r-introduce1+ 0 cell)
-        (let ((status
-                (loop (multiple-value-bind (hop rcmd rsid len data) (circ:recv-relay intro-circ)
-                        (declare (ignore hop rsid len))
-                        (when (= rcmd +r-introduce-ack+)
-                          (return (logior (ash (aref data 0) 8) (aref data 1))))))))
-          (ignore-errors (circ:destroy-circuit intro-circ))
-          (ignore-errors (link:close-link (circ:circuit-link intro-circ)))
-          (list :status status :rend-circ rend-circ :cookie cookie
-                :x x :xpub xpub
-                :auth-key (desc:intro-point-auth-key intro-point)
-                :enc-key (desc:intro-point-enc-key intro-point)))))))
+   :cookie, :x, :xpub, :auth-key, :enc-key so the rendezvous handshake can complete.
+   Circuits are torn down on failure (the intro circuit always); the caller owns the
+   returned :rend-circ."
+  (let ((rend-circ nil) (intro-circ nil) (done nil))
+    (unwind-protect
+         (let* ((rp (dir:enrich-relay (dir:pick-relay :flag "Fast" :relays relays)))
+                (rp-link-specs (%relay-link-specs rp))
+                (cookie (c:random-bytes 20)))
+           (setf rend-circ (%build-circ-to rp relays))
+           ;; ESTABLISH_RENDEZVOUS on the rendezvous circuit
+           (circ:send-relay rend-circ +r-establish-rendezvous+ 0 cookie)
+           (loop (multiple-value-bind (hop rcmd rsid len data) (circ:recv-relay rend-circ)
+                   (declare (ignore hop rsid len data))
+                   (when (= rcmd +r-rendezvous-established+) (return))))
+           ;; INTRODUCE1 via a separate circuit to the intro point
+           (setf intro-circ (%build-circ-to (%intro-relay intro-point) relays))
+           (multiple-value-bind (cell xpub x)
+               (%build-introduce1 (desc:intro-point-auth-key intro-point) cookie
+                                  (dir:relay-ntor-key rp) rp-link-specs
+                                  (desc:intro-point-enc-key intro-point) subcred)
+             (circ:send-relay intro-circ +r-introduce1+ 0 cell)
+             (let ((status
+                     (loop (multiple-value-bind (hop rcmd rsid len data) (circ:recv-relay intro-circ)
+                             (declare (ignore hop rsid len))
+                             (when (= rcmd +r-introduce-ack+)
+                               (return (logior (ash (aref data 0) 8) (aref data 1))))))))
+               (setf done t)
+               (list :status status :rend-circ rend-circ :cookie cookie
+                     :x x :xpub xpub
+                     :auth-key (desc:intro-point-auth-key intro-point)
+                     :enc-key (desc:intro-point-enc-key intro-point)))))
+      (%teardown intro-circ)                 ; the intro circuit is never needed past ACK
+      (unless done (%teardown rend-circ)))))  ; on failure, drop the rendezvous circuit too
 
 ;;; --- rendezvous completion (H5): finish hs-ntor + splice the service hop ------
 
@@ -179,10 +190,13 @@
 
 ;;; --- full client -------------------------------------------------------------
 
-(defun connect-onion (onion &key (port 80))
+(defun connect-onion (onion &key (port 80) (max-tries 6) (timeout 40))
   "Connect to a v3 ONION service: fetch+decrypt its descriptor, introduce, complete
-   the rendezvous, and open a stream to PORT.  Tries intro points until one works.
-   Returns (values circuit stream-id)."
+   the rendezvous, and open a stream to PORT.  A single introduce+rendezvous over the
+   fragile 6-hop path is only ~2/3 reliable, so RETRY up to MAX-TRIES (cycling through
+   the intro points), each bounded by TIMEOUT seconds so a dead rendezvous can't hang
+   us — with 6 tries the effective success rate is ~99%.  Returns (values circuit
+   stream-id)."
   (let* ((pk (hsdir:onion->pubkey onion))
          (text (dir:fetch-consensus))
          (relays (dir:consensus-relays)))
@@ -193,12 +207,20 @@
                (inner (desc:decrypt-descriptor outer pk tp plen))
                (points (desc:intro-points inner))
                (subcred (ed:subcredential pk (ed:blind-public-key pk tp plen))))
-          (dolist (ip points (error "connect-onion: all ~d intro points failed" (length points)))
-            (handler-case
-                (let ((result (introduce ip subcred relays)))
-                  (unless (eql 0 (getf result :status))
-                    (error "INTRODUCE_ACK status ~a" (getf result :status)))
-                  (let* ((circ (rend-complete result (await-rendezvous2 (getf result :rend-circ))))
-                         (sid (strm:begin-stream circ "" port)))
-                    (return-from connect-onion (values circ sid))))
-              (error (e) (format *error-output* "  intro point failed: ~a~%" e)))))))))
+          (when (null points) (error "connect-onion: ~a has no introduction points" onion))
+          (loop for try from 1 to max-tries
+                for ip = (nth (mod (1- try) (length points)) points)   ; cycle intro points
+                do (let ((result nil))
+                     (handler-case
+                         (sb-ext:with-timeout timeout
+                           (setf result (introduce ip subcred relays))
+                           (unless (eql 0 (getf result :status))
+                             (error "INTRODUCE_ACK status ~a" (getf result :status)))
+                           (let* ((circ (rend-complete result
+                                                       (await-rendezvous2 (getf result :rend-circ))))
+                                  (sid (strm:begin-stream circ "" port)))
+                             (return-from connect-onion (values circ sid))))
+                       (serious-condition (e)
+                         (%teardown (getf result :rend-circ))   ; clean up the failed try
+                         (format *error-output* "  onion try ~d/~d failed: ~a~%" try max-tries e))))
+                finally (error "connect-onion: ~a unreachable after ~d tries" onion max-tries)))))))
