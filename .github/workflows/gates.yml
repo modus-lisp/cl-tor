@@ -11,7 +11,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          path: cl-tor
           submodules: recursive
+
+      # cl-tor/test reaches seal for TLS and cl-transport for dialling; seal needs
+      # natrium.  The transitive closure, read from the balanced :depends-on forms.
+      - name: Sibling checkouts
+        run: |
+          for repo in seal natrium cl-transport; do
+            git clone --depth 1 -q https://github.com/modus-lisp/$repo.git "$repo"
+          done
       - name: Install SBCL
         run: sudo apt-get update -qq && sudo apt-get install -y -qq sbcl
 
@@ -30,4 +39,5 @@ jobs:
                --eval '(ql-util:without-prompting (ql:add-to-init-file))'
           sbcl --non-interactive --eval '(ql:quickload (list :bordeaux-threads :chipz :ironclad :usocket))'
       - name: Gate suite
+        working-directory: cl-tor
         run: sh inspect/run-all.sh
