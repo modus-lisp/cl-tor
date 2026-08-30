@@ -14,5 +14,17 @@ jobs:
           submodules: recursive
       - name: Install SBCL
         run: sudo apt-get update -qq && sudo apt-get install -y -qq sbcl
+
+      # QUICKLISP, for ironclad.  This repo's crypto leans on it, and on a developer's
+      # machine ~/.sbclrc has already loaded quicklisp before any gate runs -- which is
+      # exactly why the suite passed everywhere except here.  A runner has no such file,
+      # so the dependency has to be asked for out loud.
+      - name: Quicklisp (ironclad)
+        run: |
+          curl -sSLo /tmp/quicklisp.lisp https://beta.quicklisp.org/quicklisp.lisp
+          sbcl --non-interactive --load /tmp/quicklisp.lisp \
+               --eval '(quicklisp-quickstart:install :path "~/quicklisp/")' \
+               --eval '(ql-util:without-prompting (ql:add-to-init-file))'
+          sbcl --non-interactive --eval '(ql:quickload :ironclad)'
       - name: Gate suite
         run: sh inspect/run-all.sh
