@@ -66,7 +66,7 @@
            (multiple-value-bind (status body) (%split-http (%read-all stream))
              (unless (eql status 200) (error "http ~a for ~a~a" status host path))
              (if (and (>= (length path) 2) (string= (subseq path (- (length path) 2)) ".z"))
-                 (chipz:decompress nil 'chipz:zlib body)
+                 (values (cram:zlib-decompress body))
                  body)))
       (ignore-errors (usocket:socket-close sock)))))
 

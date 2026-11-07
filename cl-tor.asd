@@ -7,10 +7,10 @@
   :version "0.0.1"
   :author "ynniv"
   :license "MIT"
-  :depends-on ("ironclad"            ; crypto primitives (SHA-1/256, HMAC, AES-CTR, X25519, Ed25519, RSA)
+  :depends-on ("natrium"             ; crypto primitives (SHA-1/256/512, SHA-3, SHAKE, HMAC, AES-CTR, X25519, Ed25519)
                "usocket"             ; TCP to relay ORPorts + directory HTTP
                "seal"               ; pure-CL TLS 1.3 link layer (no OpenSSL/FFI)
-               "chipz"               ; zlib inflate (directory documents are compressed)
+               "cram"                ; zlib inflate (directory documents are compressed)
                "bordeaux-threads")   ; per-circuit read loops
   :serial t
   :components
@@ -19,7 +19,7 @@
     :components
     ((:file "packages")   ; package layout
      (:file "util")       ; hex, byte ops, big/little-endian framing
-     (:file "crypto")     ; thin wrappers over ironclad (the cipher suite Tor uses)
+     (:file "crypto")     ; thin wrappers over natrium (the cipher suite Tor uses)
      (:file "ed25519")    ; Ed25519 group arithmetic + v3 onion key blinding
      (:file "ntor")       ; ntor-curve25519-sha256-1 circuit handshake + key derivation
      (:file "directory")  ; minimal directory bootstrap: consensus + microdescs + selection

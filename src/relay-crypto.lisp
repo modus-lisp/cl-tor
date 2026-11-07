@@ -28,8 +28,7 @@
 
 (defstruct (hop (:constructor %make-hop)) relay kf kb df db kh)
 
-(defun %seeded-sha1 (seed)
-  (let ((d (ironclad:make-digest :sha1))) (ironclad:update-digest d seed) d))
+(defun %seeded-sha1 (seed) (c:running-digest :sha1 seed))
 
 (defun make-hop (relay keys)
   "Build a HOP's crypto state from its ntor CIRCUIT-KEYS."
@@ -40,8 +39,7 @@
              :db (%seeded-sha1 (n:circuit-keys-db keys))
              :kh (n:circuit-keys-kh keys)))     ; KH for the service's ESTABLISH_INTRO MAC
 
-(defun %seeded-sha3-256 (seed)
-  (let ((d (ironclad:make-digest :sha3/256))) (ironclad:update-digest d seed) d))
+(defun %seeded-sha3-256 (seed) (c:running-digest :sha3-256 seed))
 
 (defun make-hs-hop (relay kf kb df db)
   "Build a v3 rendezvous (client<->service) hop: AES-256-CTR ciphers + SHA3-256
@@ -55,7 +53,7 @@ running digests, from the raw 32-byte hs-ntor keys.  The cell machinery
 
 (defun %digest4 (running)
   "First 4 bytes of RUNNING's current value (non-destructive)."
-  (subseq (ironclad:produce-digest (ironclad:copy-digest running)) 0 4))
+  (subseq (c:running-value running) 0 4))
 
 (defun build-relay-body (hop relay-cmd stream-id data)
   "Construct the 509-byte relay body destined for HOP, with the forward digest
@@ -65,7 +63,7 @@ filled in (advances HOP's forward running digest)."
     (u:put-u16be body 3 stream-id)               ; digest [5..8] stays 0 for hashing
     (u:put-u16be body 9 (length data))
     (replace body data :start1 11)
-    (ironclad:update-digest (hop-df hop) body)   ; digest over body with zero Digest field
+    (c:running-update (hop-df hop) body)         ; digest over body with zero Digest field
     (replace body (%digest4 (hop-df hop)) :start1 5)
     body))
 
@@ -78,17 +76,17 @@ filled in (advances HOP's forward running digest)."
 (defun hop-recv-digest (hop)
   "The full 20-byte backward rolling digest of HOP after the last recognized cell
 (used as the authenticator in circuit-level v1 SENDMEs)."
-  (ironclad:produce-digest (ironclad:copy-digest (hop-db hop))))
+  (c:running-value (hop-db hop)))
 
 (defun recognized-and-valid (hop body)
   "T iff BODY (already CTR-decrypted for HOP) is recognized at HOP: Recognized==0
 and the backward running digest matches.  Commits HOP's backward digest on match."
   (when (zerop (u:read-u16be body 1))                ; Recognized field == 0
     (let ((claimed (u:subv body 5 9))
-          (probe (ironclad:copy-digest (hop-db hop)))
+          (probe (c:running-copy (hop-db hop)))
           (b0 (copy-seq body)))
       (fill b0 0 :start 5 :end 9)                     ; zero Digest field for hashing
-      (ironclad:update-digest probe b0)
+      (c:running-update probe b0)
       (when (u:bytes= (%digest4 probe) claimed)
         (setf (hop-db hop) probe)                     ; commit the advanced state
         t))))

@@ -26,7 +26,7 @@ yet guarantee. No warranty (see [LICENSE](LICENSE)).
 ## Status
 
 - **Crypto suite** ✅ — SHA-1/256/3, HMAC-SHA256, HKDF, AES-128-CTR, X25519,
-  Ed25519, over `ironclad`. Verified: X25519 vs **RFC 7748**, HKDF vs **RFC 5869**.
+  Ed25519, over `natrium` (pure Lisp). Verified: X25519 vs **RFC 7748**, HKDF vs **RFC 5869**.
 - **ntor handshake** ✅ — `ntor-curve25519-sha256-1`: client + server, KEY_SEED/
   AUTH, HKDF expansion to the per-hop keys (Df/Db/Kf/Kb). Full client↔server
   key agreement + AUTH accept/reject.
@@ -95,7 +95,7 @@ cl-tor-transport.asd    optional cl-transport backend (dial over Tor / .onion)
 src/
   packages              package layout
   util                  bytes / hex / big-endian cell framing
-  crypto                the Tor cipher suite over ironclad
+  crypto                the Tor cipher suite over natrium
   ntor                  ntor-curve25519-sha256-1 handshake + key derivation
   directory             consensus fetch + signature validation + path selection
   cell                  fixed/variable cell framing
@@ -116,9 +116,9 @@ inspect/
 
 ## Dependencies
 
-SBCL + Quicklisp (`ironclad`, `usocket`, `cl+ssl`, `bordeaux-threads`). The crypto
-is isolated in `src/crypto.lisp` so the modus port is mostly a matter of
-re-pointing that one file at `net/crypto`.
+SBCL + the org's `natrium` (crypto), `cram` (inflate) and `seal` (TLS), plus
+Quicklisp's `usocket` and `bordeaux-threads`.  The crypto is isolated in
+`src/crypto.lisp`; natrium and cram are pure Lisp and run on modus too.
 
 ## Quick start
 

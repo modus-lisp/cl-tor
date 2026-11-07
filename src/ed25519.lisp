@@ -1,11 +1,11 @@
 ;;;; src/ed25519.lisp — Ed25519 group arithmetic + v3 onion key blinding.
 ;;;;
-;;;; cl-tor.crypto only VERIFIES Ed25519 signatures (via ironclad); v3 onion services
+;;;; cl-tor.crypto only VERIFIES Ed25519 signatures (via natrium); v3 onion services
 ;;;; need the group itself — scalar-mult of an arbitrary point — to derive blinded
 ;;;; keys (rend-spec-v3 key blinding).  This is a from-scratch, spec-exact Edwards
 ;;;; implementation (RFC 8032 curve, extended coordinates), kept separate so the
 ;;;; modus port can re-point it like the rest of the crypto.  CL bignums do the field
-;;;; arithmetic; correctness is cross-checked against ironclad's Ed25519 keygen.
+;;;; arithmetic; correctness is cross-checked against natrium's Ed25519 keygen.
 
 (defpackage #:cl-tor.ed25519
   (:use #:cl)
@@ -99,13 +99,11 @@
       (unless (= (logand x 1) sign) (setf x (fsub 0 x)))
       (mk x y 1 (fmul x y)))))
 
-;;; --- SHAKE256 (ironclad) ----------------------------------------------------
+;;; --- SHAKE256 (natrium, via cl-tor.crypto) ----------------------------------
 
 (defun shake256 (bytes nbytes)
   "SHAKE256 XOF of BYTES to NBYTES output."
-  (let ((d (ironclad:make-digest :shake256 :output-length nbytes)))
-    (ironclad:update-digest d (u:cat bytes))
-    (ironclad:produce-digest d)))
+  (c:shake256 bytes nbytes))
 
 ;;; --- v3 onion key blinding (rend-spec-v3) -----------------------------------
 
@@ -163,7 +161,7 @@
 ;;; S*B = R + H(R|A|M)*A, so any secret unique nonce is fine — we derive it
 ;;; deterministically from the signer's own prefix so signing needs no entropy.
 
-(defun %sha512 (bytes) (ironclad:digest-sequence :sha512 (u:cat bytes)))
+(defun %sha512 (bytes) (c:sha512 bytes))
 
 (defun expand-seed (seed)
   "RFC 8032: SHA-512(SEED) -> (values scalar prefix), scalar clamped."

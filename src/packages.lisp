@@ -1,8 +1,7 @@
 ;;;; src/packages.lisp — package layout for cl-tor.
 ;;;;
 ;;;; One package per concern (cl-consensus / cl-nostr style).  The crypto is the
-;;;; fixed Tor cipher suite — wrapped over ironclad on SBCL today, with an eye to
-;;;; swapping in modus's own net/crypto when this is adapted to the native compiler.
+;;;; fixed Tor cipher suite — wrapped over natrium (pure Lisp: SBCL and modus).
 
 (defpackage #:cl-tor.util
   (:use #:cl)
@@ -16,7 +15,8 @@
   (:local-nicknames (#:u #:cl-tor.util))
   (:export
    #:random-bytes
-   #:sha1 #:sha256 #:sha3-256
+   #:sha1 #:sha256 #:sha3-256 #:sha512 #:shake256
+   #:running-digest #:running-update #:running-copy #:running-value
    #:hmac-sha256 #:hkdf-expand
    #:x25519 #:x25519-basepoint #:x25519-public #:gen-x25519
    #:aes128-ctr-cipher #:ctr-apply

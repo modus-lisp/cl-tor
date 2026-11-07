@@ -1,25 +1,52 @@
-;;;; src/crypto.lisp — the Tor cipher suite, wrapped over ironclad.
+;;;; src/crypto.lisp — the Tor cipher suite, wrapped over natrium.
 ;;;;
 ;;;; Tor uses a small, fixed set of primitives: SHA-1 (relay-cell running digest)
 ;;;; and SHA-256 (ntor / directory), HMAC-SHA256 (ntor's H and HKDF), AES-128-CTR
 ;;;; (relay-cell onion crypto), Curve25519/X25519 (ntor key exchange), and Ed25519
 ;;;; (relay identity / cert validation).  These thin wrappers give them byte-vector
-;;;; signatures so the protocol layers above never touch ironclad objects — which
-;;;; also makes the eventual modus port a matter of re-pointing this one file.
+;;;; signatures so the protocol layers above never touch a hash or cipher object
+;;;; directly.  natrium is pure Lisp and runs on modus as well as SBCL.
 
 (in-package #:cl-tor.crypto)
 
-(defun random-bytes (n) (ironclad:random-data n))
+(defun random-bytes (n) (natrium:random-bytes n))
 
-(defun sha1   (bytes) (ironclad:digest-sequence :sha1   (u::cat bytes)))
-(defun sha256 (bytes) (ironclad:digest-sequence :sha256 (u::cat bytes)))
-(defun sha3-256 (bytes) (ironclad:digest-sequence :sha3/256 (u::cat bytes)))
+(defun sha1   (bytes) (natrium:sha1 (u::cat bytes)))
+(defun sha256 (bytes) (natrium:sha256 (u::cat bytes)))
+(defun sha3-256 (bytes) (natrium:sha3-256 (u::cat bytes)))
+(defun sha512 (bytes) (natrium:sha512 (u::cat bytes)))
+(defun shake256 (bytes nbytes)
+  "SHAKE256 XOF of BYTES to NBYTES output."
+  (natrium:shake256 (u::cat bytes) nbytes))
 
 (defun hmac-sha256 (key msg)
   "HMAC-SHA256(key, msg) -> 32 bytes."
-  (let ((m (ironclad:make-hmac (u::cat key) :sha256)))
-    (ironclad:update-hmac m (u::cat msg))
-    (ironclad:hmac-digest m)))
+  (natrium:hmac-sha256 (u::cat key) (u::cat msg)))
+
+;;; ---- running digests (relay cells) ----------------------------------------
+;;; A relay hop keeps one digest running over every cell in each direction and reads
+;;; it part-way after each: SHA-1 for ordinary circuits, SHA3-256 for v3 onion
+;;; services.  A running digest is a natrium streaming state; reading one copies it.
+
+(defun running-digest (kind seed)
+  "A digest of KIND (:sha1 or :sha3-256) running from SEED."
+  (running-update (ecase kind (:sha1 (natrium:sha1-init)) (:sha3-256 (natrium:make-sha3-256-state)))
+                  seed))
+
+(defun running-update (d bytes)
+  "Advance the running digest D over BYTES.  Returns D."
+  (let ((b (u::cat bytes)))
+    (if (typep d 'natrium::sha1-state) (natrium:sha1-update d b) (natrium:sha3-update d b)))
+  d)
+
+(defun running-copy (d)
+  "An independent copy of the running digest D."
+  (if (typep d 'natrium::sha1-state) (natrium:sha1-copy-state d) (natrium:sha3-copy-state d)))
+
+(defun running-value (d)
+  "D's digest so far, leaving D running."
+  (let ((c (running-copy d)))
+    (if (typep d 'natrium::sha1-state) (natrium:sha1-final c) (natrium:sha3-final c))))
 
 (defun hkdf-expand (prk info length)
   "RFC-5869 HKDF-Expand with HMAC-SHA256: expand PRK to LENGTH bytes using INFO."
@@ -34,9 +61,7 @@
 
 (defun x25519 (scalar point)
   "RFC-7748 X25519: SCALAR (32 bytes) times POINT u-coordinate (32 bytes) -> 32 bytes."
-  (ironclad:diffie-hellman
-   (ironclad:make-private-key :curve25519 :x (u::cat scalar))
-   (ironclad:make-public-key  :curve25519 :y (u::cat point))))
+  (natrium:x25519 (u::cat scalar) (u::cat point)))
 
 (defun x25519-basepoint ()
   (let ((b (u:octets 32))) (setf (aref b 0) 9) b))
@@ -52,16 +77,14 @@
 ;;; ---- AES-128-CTR (relay-cell crypto) ------------------------------------
 
 (defun aes128-ctr-cipher (key &optional (iv (u:octets 16)))
-  "A stateful AES-128-CTR cipher object; advance it with CTR-APPLY."
-  (ironclad:make-cipher :aes :key (u::cat key) :mode :ctr
-                            :initialization-vector (u::cat iv)))
+  "A stateful AES-CTR cipher (AES-128, or AES-256 for a 32-byte KEY); advance it with
+CTR-APPLY.  The key is copied into fixed memory, as natrium's AES requires."
+  (natrium:make-aes-ctr-stream (natrium:make-aes-key (gossamer:fixed-copy (u::cat key))) (u::cat iv)))
 
 (defun ctr-apply (cipher bytes)
   "Apply CTR keystream to BYTES (encrypt == decrypt), advancing CIPHER's counter.
 Returns a fresh byte vector."
-  (let ((buf (u::cat bytes)))
-    (ironclad:encrypt-in-place cipher buf)
-    buf))
+  (natrium:aes-stream-xor cipher (u::cat bytes)))
 
 ;;; ---- RSA (directory / consensus signatures) -----------------------------
 ;;; Implemented from scratch (modexp + DER parse + PKCS#1 v1.5 unpadding) so the
@@ -134,7 +157,5 @@ raw RSA (sig^e mod n), PKCS#1 v1.5 unpad (00 01 FF.. 00), tail == EXPECTED-DIGES
 (defun ed25519-verify (public-key32 message sig64)
   "T iff SIG64 is a valid Ed25519 signature of MESSAGE under PUBLIC-KEY32."
   (handler-case
-      (ironclad:verify-signature
-       (ironclad:make-public-key :ed25519 :y (u::cat public-key32))
-       (u::cat message) (u::cat sig64))
+      (natrium:ed25519-verify (u::cat public-key32) (u::cat message) (u::cat sig64))
     (error () nil)))
