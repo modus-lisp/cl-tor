@@ -18,7 +18,7 @@ jobs:
       # natrium.  The transitive closure, read from the balanced :depends-on forms.
       - name: Sibling checkouts
         run: |
-          for repo in seal natrium cl-transport; do
+          for repo in seal natrium cl-transport cram; do
             git clone --depth 1 -q https://github.com/modus-lisp/$repo.git "$repo"
           done
       - name: Install SBCL
