@@ -30,7 +30,7 @@
 
 (defun close-link (link)
   (ignore-errors (close (link-stream link)))
-  (ignore-errors (usocket:socket-close (link-sock link)))
+  (when (link-sock link) (cl-transport.sockets:tcp-close (link-sock link)))
   (when (link-conn link) (ignore-errors (seal:tls-close (link-conn link))))
   link)
 
@@ -145,10 +145,10 @@ matched to the consensus RSA id.  Returns the Ed25519 identity, or signals."
 ;;; ---- connect ------------------------------------------------------------
 
 (defun %seal-transport (sock)
-  "A seal TLS transport over an already-connected usocket SOCK, so cl-tor keeps owning
+  "A seal TLS transport over an already-connected TCP-SOCKET SOCK, so cl-tor keeps owning
    the socket — closing it still unblocks a reader parked in a cell read, exactly as
    before (the gray-stream / socks close paths are unchanged)."
-  (let* ((bsd (usocket:socket sock))
+  (let* ((bsd (cl-transport.sockets:tcp-socket-sock sock))
          (fd (sb-bsd-sockets:socket-file-descriptor bsd)))
     (seal::%make-transport
      :sender (lambda (bytes)
@@ -162,15 +162,14 @@ matched to the consensus RSA id.  Returns the Ed25519 identity, or signals."
                            (declare (ignore data))
                            (when (and len (plusp len)) (subseq buf 0 len)))
                        (sb-bsd-sockets:socket-error () nil)))))
-     :closer (lambda () (ignore-errors (usocket:socket-close sock))))))
+     :closer (lambda () (cl-transport.sockets:tcp-close sock)))))
 
 (defun connect-link (relay &key (timeout 20))
   "Open and complete a link handshake to RELAY (a dir:relay).  Returns a LINK.  The TLS
    is pure Common Lisp via seal (no OpenSSL / FFI); relays' self-signed certs are not
    CA-checked (:verify nil) — Tor binds identity through the CERTS cell instead."
   (let* ((ip (dir:relay-ip relay)) (port (dir:relay-or-port relay))
-         (sock (usocket:socket-connect ip port :element-type '(unsigned-byte 8)
-                                               :timeout timeout))
+         (sock (cl-transport.sockets:tcp-connect ip port :timeout-secs timeout))
          (conn (seal:connect ip port :verify nil :timeout timeout
                                      :transport (%seal-transport sock)))
          (tls (seal:make-tls-stream conn))

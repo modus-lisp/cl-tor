@@ -47,7 +47,7 @@ jobs:
             echo "quicklisp install attempt $attempt failed; retrying"
             sleep 10
           done
-          sbcl --non-interactive --eval '(ql:quickload (list :bordeaux-threads :chipz :ironclad :usocket))'
+          sbcl --non-interactive --eval '(ql:quickload (list :bordeaux-threads :chipz :ironclad))'
       - name: Gate suite
         working-directory: cl-tor
         run: sh inspect/run-all.sh

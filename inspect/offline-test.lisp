@@ -9,7 +9,8 @@
 (defpackage #:cl-tor.test
   (:use #:cl)
   (:local-nicknames (#:u #:cl-tor.util) (#:c #:cl-tor.crypto) (#:n #:cl-tor.ntor)
-                    (#:d #:cl-tor.directory) (#:rc #:cl-tor.relay-crypto))
+                    (#:d #:cl-tor.directory) (#:rc #:cl-tor.relay-crypto)
+                    (#:bt #:bordeaux-threads))
   (:export #:run))
 
 (in-package #:cl-tor.test)
@@ -179,6 +180,70 @@ w Bandwidth=600~%"))
       (check-true "one-sided legacy => not same family" (not (d::%same-family f g)))
       (check-true "unrelated => not same family" (not (d::%same-family a c))))))
 
+;;; ---- the sockets, on loopback ------------------------------------------------
+;;; cl-tor's TCP is cl-transport/sockets (it was usocket).  No Tor network: a one-shot
+;;; HTTP server on 127.0.0.1 for the directory fetch, and a SOCKS5 client talking to
+;;; the proxy's own wire functions over a real connection.
+
+(defun %one-shot-server (respond)
+  "A listener on 127.0.0.1:0 that answers ONE connection with RESPOND (called with the
+   accepted TCP-SOCKET) on a thread.  (values port thread); the thread's value (JOIN-THREAD)
+   is RESPOND's -- returned, not stored, since a modus thread may not store its objects
+   into another thread's memory."
+  (let ((l (cl-transport.sockets:tcp-listen)))
+    (values (cl-transport.sockets:tcp-listener-port l)
+            (bt:make-thread
+             (lambda ()
+               (unwind-protect
+                    (let ((a (cl-transport.sockets:tcp-accept l :timeout-ms 10000)))
+                      (when a (unwind-protect (funcall respond a) (cl-transport.sockets:tcp-close a))))
+                 (cl-transport.sockets:tcp-listener-close l)))
+             :name "cl-tor test server"))))
+
+(defun test-sockets ()
+  (format t "~%sockets on loopback (cl-transport/sockets):~%")
+  (progn
+    (multiple-value-bind (port th)
+        (%one-shot-server
+         (lambda (a)
+           (let* ((s (cl-transport.sockets:tcp-socket-stream a))
+                  (lines (loop for line = (with-output-to-string (o)
+                                            (loop for b = (read-byte s) until (= b 10)
+                                                  do (write-char (code-char b) o)))
+                               until (string= (string-right-trim '(#\Return) line) "")
+                               collect (string-right-trim '(#\Return) line))))
+             (write-sequence (map '(vector (unsigned-byte 8)) #'char-code
+                                  (format nil "HTTP/1.0 200 OK~c~cContent-Type: text/plain~c~c~c~cconsensus bytes"
+                                          #\Return #\Newline #\Return #\Newline #\Return #\Newline))
+                             s)
+             (finish-output s)
+             lines)))
+      (let* ((body (d::http-get "127.0.0.1" port "/tor/status-vote/current/consensus" :timeout 10))
+             (request (bt:join-thread th)))
+        (check "http-get: the body after the headers" (map 'string #'code-char body) "consensus bytes" :test #'string=)
+        (check "http-get: the request line" (first request) "GET /tor/status-vote/current/consensus HTTP/1.0" :test #'string=))))
+  (progn
+    (multiple-value-bind (port th)
+        (%one-shot-server
+         (lambda (a)
+           (let ((s (cl-transport.sockets:tcp-socket-stream a)))
+             (cl-tor.socks::%socks-handshake s)
+             (prog1 (multiple-value-list (cl-tor.socks::%read-request s))
+               (cl-tor.socks::%reply s 0)))))
+      (let* ((c (cl-transport.sockets:tcp-connect "127.0.0.1" port))
+             (s (cl-transport.sockets:tcp-socket-stream c)))
+        (unwind-protect
+             (progn
+               (write-sequence (coerce #(5 1 0) '(vector (unsigned-byte 8))) s) (finish-output s)
+               (check "socks: no-auth chosen" (list (read-byte s) (read-byte s)) '(5 0))
+               (write-sequence (concatenate '(vector (unsigned-byte 8)) #(5 1 0 3 11)
+                                            (map 'vector #'char-code "example.org") #(1 187))
+                               s)
+               (finish-output s)
+               (check "socks: CONNECT succeeded" (loop repeat 10 collect (read-byte s)) '(5 0 0 1 0 0 0 0 0 0)))
+          (cl-transport.sockets:tcp-close c))
+        (check "socks: the proxy read the target" (bt:join-thread th) '("example.org" 443) :test #'equal)))))
+
 (defun run ()
   (setf *pass* 0 *fail* 0)
   (format t "~&=== cl-tor offline gate (crypto + ntor + directory + relay) ===~%")
@@ -193,6 +258,7 @@ w Bandwidth=600~%"))
   (test-exit-policy)
   (test-path-constraints)
   (test-family)
+  (test-sockets)
   (format t "~%=== ~d passed, ~d failed ===~%" *pass* *fail*)
   (when (plusp *fail*) (error "cl-tor offline gate: ~d failures" *fail*))
   t)

@@ -122,8 +122,10 @@
   (with-slots (circuit sid lock cv closed reader) s
     (bt:with-lock-held (lock) (setf closed t) (bt:condition-notify cv))
     (ignore-errors (strm:end-stream circuit sid))
-    ;; unblock the reader (mid RECV-RELAY on the TLS link) by closing the link sock
-    (ignore-errors (usocket:socket-close (link:link-sock (circ:circuit-link circuit))))
+    ;; unblock the reader (mid RECV-RELAY on the TLS link) by SHUTTING DOWN the link sock:
+    ;; that wakes a blocked read, which closing a descriptor does not; CLOSE-LINK below
+    ;; closes it once the reader is joined
+    (cl-transport.sockets:tcp-shutdown (link:link-sock (circ:circuit-link circuit)))
     (when reader (ignore-errors (bt:join-thread reader)))
     (ignore-errors (circ:destroy-circuit circuit))
     (ignore-errors (link:close-link (circ:circuit-link circuit)))

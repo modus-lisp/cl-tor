@@ -4,7 +4,7 @@
 ;;;; stream to the requested host:port at the exit, and splices bytes both ways.
 ;;;; Host *names* are passed to the exit for resolution (ATYP=domain), so DNS
 ;;;; never leaks to the local resolver.  A single-threaded select loop per
-;;;; connection (usocket:wait-for-input + draining buffered TLS cells) keeps us
+;;;; connection (a readiness wait + draining buffered TLS cells) keeps us
 ;;;; off concurrent OpenSSL access.
 
 (in-package #:cl-tor.socks)
@@ -72,7 +72,7 @@ retrying past relay churn; a guard that won't connect is dropped from the set."
   "Full duplex: a dedicated thread pumps tor->app with blocking reads (no
 non-blocking TLS peeking, which corrupts cl+ssl under load); this thread pumps
 app->tor.  Circuit writes are serialized by the circuit's write-lock."
-  (let* ((app (usocket:socket-stream app-sock))
+  (let* ((app (cl-transport.sockets:tcp-socket-stream app-sock))
          (reader (bt:make-thread
                   (lambda ()
                     (handler-case
@@ -83,7 +83,8 @@ app->tor.  Circuit writes are serialized by the circuit's write-lock."
                               ((= rcmd rc:+r-data+) (write-sequence data app) (force-output app))
                               ((= rcmd rc:+r-end+) (return)))))
                       (serious-condition () nil))
-                    (ignore-errors (usocket:socket-close app-sock)))   ; unblock our app read
+                    ;; unblock our app read: shut down, not close -- %HANDLE closes it
+                    (cl-transport.sockets:tcp-shutdown app-sock))
                   :name "cl-tor tor->app")))
     (unwind-protect
          (handler-case
@@ -94,7 +95,7 @@ app->tor.  Circuit writes are serialized by the circuit's write-lock."
       ;; Unblock the reader by closing the underlying TCP socket — NOT the SSL
       ;; object: freeing that while the reader is mid-SSL_read is a use-after-
       ;; free (segfault).  Join the reader, then %handle frees the SSL stream.
-      (ignore-errors (usocket:socket-close (link:link-sock (circ:circuit-link circ))))
+      (cl-transport.sockets:tcp-shutdown (link:link-sock (circ:circuit-link circ)))
       (ignore-errors (bt:join-thread reader)))))
 
 ;;; ---- server -------------------------------------------------------------
@@ -103,7 +104,7 @@ app->tor.  Circuit writes are serialized by the circuit's write-lock."
   (let ((circ nil))
     (unwind-protect
          (handler-case
-             (let ((s (usocket:socket-stream app-sock)))
+             (let ((s (cl-transport.sockets:tcp-socket-stream app-sock)))
                (%socks-handshake s)
                (multiple-value-bind (host port) (%read-request s)
                  (setf circ (build-fresh-circuit :port port))
@@ -118,15 +119,16 @@ app->tor.  Circuit writes are serialized by the circuit's write-lock."
       (when circ (ignore-errors (strm:end-stream circ 1))
             (ignore-errors (circ:destroy-circuit circ))
             (ignore-errors (link:close-link (circ:circuit-link circ))))
-      (ignore-errors (usocket:socket-close app-sock)))))
+      (cl-transport.sockets:tcp-close app-sock))))
 
 (defun run-proxy (&key (host "127.0.0.1") (port 9050))
   "Run a SOCKS5 proxy on HOST:PORT, each connection over a fresh Tor circuit."
   (format t "[cl-tor] SOCKS5 proxy on ~a:~d~%" host port)
-  (let ((server (usocket:socket-listen host port :reuse-address t
-                                                 :element-type '(unsigned-byte 8))))
+  (let ((server (cl-transport.sockets:tcp-listen :host host :port port)))
     (unwind-protect
-         (loop for app = (usocket:socket-accept server :element-type '(unsigned-byte 8))
-               do (bordeaux-threads:make-thread
-                   (lambda () (%handle app)) :name "cl-tor socks conn"))
-      (ignore-errors (usocket:socket-close server)))))
+         (loop for app = (cl-transport.sockets:tcp-accept server)
+               when app
+                 do (let ((app app))
+                      (bordeaux-threads:make-thread
+                       (lambda () (%handle app)) :name "cl-tor socks conn")))
+      (cl-transport.sockets:tcp-listener-close server))))

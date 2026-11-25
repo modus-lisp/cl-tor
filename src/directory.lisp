@@ -53,10 +53,10 @@
 
 (defun http-get (host port path &key (timeout 30))
   "HTTP/1.0 GET; returns body bytes.  Inflates a zlib body when PATH ends in .z."
-  (let ((sock (usocket:socket-connect host port :element-type '(unsigned-byte 8)
-                                                 :timeout timeout)))
+  (let ((sock (cl-transport.sockets:tcp-connect host port :timeout-secs timeout)))
     (unwind-protect
-         (let ((stream (usocket:socket-stream sock)))
+         ;; TIMEOUT bounds each read too, as usocket's :timeout did on SBCL
+         (let ((stream (cl-transport.sockets:tcp-socket-stream sock :timeout timeout)))
            (write-sequence (u:ascii->bytes
                             (format nil "GET ~a HTTP/1.0~c~cHost: ~a~c~cConnection: close~c~c~c~c"
                                     path #\Return #\Newline host #\Return #\Newline
@@ -68,7 +68,7 @@
              (if (and (>= (length path) 2) (string= (subseq path (- (length path) 2)) ".z"))
                  (values (cram:zlib-decompress body))
                  body)))
-      (ignore-errors (usocket:socket-close sock)))))
+      (cl-transport.sockets:tcp-close sock))))
 
 ;;; ---- consensus ----------------------------------------------------------
 
