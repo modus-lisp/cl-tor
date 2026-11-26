@@ -3,29 +3,53 @@
 ;;;; Each accepted SOCKS CONNECT builds its own fresh 3-hop circuit, opens a
 ;;;; stream to the requested host:port at the exit, and splices bytes both ways.
 ;;;; Host *names* are passed to the exit for resolution (ATYP=domain), so DNS
-;;;; never leaks to the local resolver.  A single-threaded select loop per
-;;;; connection (a readiness wait + draining buffered TLS cells) keeps us
-;;;; off concurrent OpenSSL access.
+;;;; never leaks to the local resolver.
+;;;;
+;;;; THE THREADS SHARE NOTHING.  RUN-PROXY's thread is the DIRECTORY OWNER: it holds the
+;;;; consensus, the persistent guard set and the microdescriptors ENRICH-RELAY fetches into
+;;;; relay structs.  Each connection runs on a thread of its own, started on a NAMED function
+;;;; with the accepted socket and a slot's REPLY channel as :ARGUMENTS, and owns everything it
+;;;; builds -- its link, its circuit, its copy of the client socket.  When it needs a path it
+;;;; ASKS the owner over the REQUESTS channel and gets the relays back as plain data
+;;;; (DIR:RELAY->PLAIN), a copy, on its REPLY channel; a guard that would not connect is
+;;;; REPORTED the same way.  The splice is one loop on the connection's thread (a readiness
+;;;; wait over the client socket and the relay link), so a circuit is only ever touched by the
+;;;; thread that built it.
+;;;;
+;;;; That is what modus needs -- a thread there may not store an object it made into memory
+;;;; another thread made, so a connection thread could not fill the shared relay cache, and a
+;;;; reader thread could not advance a circuit its connection thread made -- and SBCL runs the
+;;;; same threads and channels (CL-TRANSPORT.CHAN), so RUN-PROXY works on any thread of either.
 
 (in-package #:cl-tor.socks)
 
 (defvar *relays* nil "Cached consensus relay list (loaded on first use).")
 
-(defun build-fresh-circuit (&key (tries 6) (port 443))
-  "Build a 3-hop circuit through a persistent entry guard (exit permitting PORT),
-retrying past relay churn; a guard that won't connect is dropped from the set."
+(defun %owner-path (port)
+  "A (guard middle exit) path from this thread's own directory state."
   (unless *relays* (setf *relays* (dir:consensus-relays)))
-  (loop for i from 1 to tries
-        for guard = (guard:pick-guard *relays*)
-        for circ = (ignore-errors
-                    (destructuring-bind (g m e)
-                        (dir:pick-path *relays* :port port :guard guard)
-                      (let ((lk (handler-case (link:connect-link g)
-                                  (error (err) (guard:guard-failed g) (error err)))))
-                        (handler-case (circ:build-circuit lk m e)
-                          (error (err) (link:close-link lk) (error err))))))
-        when circ return circ
-        finally (error "could not build a circuit after ~d tries" tries)))
+  (let ((guard (guard:pick-guard *relays*)))
+    (dir:pick-path *relays* :port port :guard guard)))
+
+(defun build-fresh-circuit (&key (tries 6) (port 443) path-fn guard-failed-fn)
+  "Build a 3-hop circuit through a persistent entry guard (exit permitting PORT),
+retrying past relay churn; a guard that won't connect is dropped from the set.
+
+PATH-FN, if given, is called with PORT for each try's (guard middle exit) path, and
+GUARD-FAILED-FN with a guard that would not connect -- how a connection thread asks
+RUN-PROXY's directory owner instead of using directory state of its own.  Without them
+this thread's own (*RELAYS*, the guard set) is used, as before."
+  (let ((path-fn (or path-fn #'%owner-path))
+        (guard-failed-fn (or guard-failed-fn #'guard:guard-failed)))
+    (loop for i from 1 to tries
+          for circ = (ignore-errors
+                      (destructuring-bind (g m e) (funcall path-fn port)
+                        (let ((lk (handler-case (link:connect-link g)
+                                    (error (err) (funcall guard-failed-fn g) (error err)))))
+                          (handler-case (circ:build-circuit lk m e)
+                            (error (err) (link:close-link lk) (error err))))))
+          when circ return circ
+          finally (error "could not build a circuit after ~d tries" tries))))
 
 ;;; ---- SOCKS5 wire (RFC 1928) ---------------------------------------------
 
@@ -56,7 +80,7 @@ retrying past relay churn; a guard that won't connect is dropped from the set."
   (write-sequence (u:cat (u:u8 5) (u:u8 status) (u:u8 0) (u:u8 1) (u:octets 4) (u:octets 2)) s)
   (force-output s))
 
-;;; ---- duplex splice ------------------------------------------------------
+;;; ---- duplex splice, on one thread ---------------------------------------
 
 (defun %read-available (stream &key (max 8192))
   "Read >=1 byte then drain what's buffered, up to MAX.  :EOF on close."
@@ -68,67 +92,174 @@ retrying past relay churn; a guard that won't connect is dropped from the set."
                 do (vector-push (read-byte stream) buf))
           (coerce buf '(simple-array (unsigned-byte 8) (*)))))))
 
+(defun %tor-ready-p (circ)
+  "Whether a relay cell can be read from CIRC's link without waiting for the network:
+decrypted bytes in hand, or TLS input pending."
+  (let ((tls (link:link-stream (circ:circuit-link circ))))
+    (and (typep tls 'seal:tls-stream) (seal:tls-stream-pending-p tls))))
+
 (defun %splice (app-sock circ sid)
-  "Full duplex: a dedicated thread pumps tor->app with blocking reads (no
-non-blocking TLS peeking, which corrupts cl+ssl under load); this thread pumps
-app->tor.  Circuit writes are serialized by the circuit's write-lock."
-  (let* ((app (cl-transport.sockets:tcp-socket-stream app-sock))
-         (reader (bt:make-thread
-                  (lambda ()
-                    (handler-case
-                        (loop
-                          (multiple-value-bind (hop rcmd rsid len data) (circ:recv-relay circ)
-                            (declare (ignore hop rsid len))
-                            (cond
-                              ((= rcmd rc:+r-data+) (write-sequence data app) (force-output app))
-                              ((= rcmd rc:+r-end+) (return)))))
-                      (serious-condition () nil))
-                    ;; unblock our app read: shut down, not close -- %HANDLE closes it
-                    (cl-transport.sockets:tcp-shutdown app-sock))
-                  :name "cl-tor tor->app")))
-    (unwind-protect
-         (handler-case
-             (loop for chunk = (%read-available app)
-                   until (eq chunk :eof)
-                   do (strm:send-stream-data circ sid chunk))
-           (serious-condition () nil))
-      ;; Unblock the reader by closing the underlying TCP socket — NOT the SSL
-      ;; object: freeing that while the reader is mid-SSL_read is a use-after-
-      ;; free (segfault).  Join the reader, then %handle frees the SSL stream.
-      (cl-transport.sockets:tcp-shutdown (link:link-sock (circ:circuit-link circ)))
-      (ignore-errors (bt:join-thread reader)))))
+  "Full duplex on THIS thread: whenever the relay link has input, read a relay cell and
+pass its data to the client; whenever the client has input, send it down the stream.
+Ends on the client's EOF, the exit's RELAY_END, or an error either way."
+  (let ((app (cl-transport.sockets:tcp-socket-stream app-sock))
+        (lsock (link:link-sock (circ:circuit-link circ))))
+    (handler-case
+        (loop
+          (let ((did nil))
+            (when (%tor-ready-p circ)
+              (setf did t)
+              (multiple-value-bind (hop rcmd rsid len data) (circ:recv-relay circ)
+                (declare (ignore hop len))
+                (cond ((and (= rcmd rc:+r-data+) (eql rsid sid))
+                       (write-sequence data app) (force-output app))
+                      ((and (= rcmd rc:+r-end+) (eql rsid sid)) (return)))))
+            (when (cl-transport.sockets:wait-readable (list app-sock) 0)
+              (setf did t)
+              (let ((chunk (%read-available app)))
+                (when (eq chunk :eof) (return))
+                (strm:send-stream-data circ sid chunk)))
+            (unless did
+              (cl-transport.sockets:wait-readable (list app-sock lsock) 50))))
+      (serious-condition (e) (format t "[socks] splice ended: ~a~%" e) (finish-output)))))
 
-;;; ---- server -------------------------------------------------------------
+;;; ---- one connection, on its own thread ----------------------------------
 
-(defun %handle (app-sock)
+(defun %handle (app-sock &key path-fn guard-failed-fn)
   (let ((circ nil))
     (unwind-protect
          (handler-case
              (let ((s (cl-transport.sockets:tcp-socket-stream app-sock)))
                (%socks-handshake s)
                (multiple-value-bind (host port) (%read-request s)
-                 (setf circ (build-fresh-circuit :port port))
+                 (setf circ (build-fresh-circuit :port port :path-fn path-fn
+                                                 :guard-failed-fn guard-failed-fn))
                  (handler-case (strm:begin-stream circ host port)
                    (error () (%reply s 5) (return-from %handle)))   ; connection refused
                  (%reply s 0)
                  (format t "[socks] CONNECT ~a:~d via ~{~a~^ -> ~}~%" host port
                          (mapcar (lambda (h) (dir:relay-nickname (rc:hop-relay h)))
                                  (circ:circuit-hops circ)))
+                 (finish-output)
                  (%splice app-sock circ 1)))
-           (serious-condition (e) (format t "[socks] error: ~a~%" e)))
+           (serious-condition (e) (format t "[socks] error: ~a~%" e) (finish-output)))
       (when circ (ignore-errors (strm:end-stream circ 1))
             (ignore-errors (circ:destroy-circuit circ))
             (ignore-errors (link:close-link (circ:circuit-link circ))))
       (cl-transport.sockets:tcp-close app-sock))))
 
-(defun run-proxy (&key (host "127.0.0.1") (port 9050))
-  "Run a SOCKS5 proxy on HOST:PORT, each connection over a fresh Tor circuit."
-  (format t "[cl-tor] SOCKS5 proxy on ~a:~d~%" host port)
-  (let ((server (cl-transport.sockets:tcp-listen :host host :port port)))
-    (unwind-protect
-         (loop for app = (cl-transport.sockets:tcp-accept server)
-               when app
-                 do (let ((app app))
-                      (bordeaux-threads:make-thread
-                       (lambda () (%handle app)) :name "cl-tor socks conn")))
-      (cl-transport.sockets:tcp-listener-close server))))
+(defun %connection-main (sock slot requests reply free)
+  "A connection thread.  SOCK is the accepted SB-BSD-SOCKETS socket (wrapped afresh here, so
+its buffers are this thread's); the directory is asked over REQUESTS, answers arrive on
+REPLY; SLOT goes back on FREE at the end."
+  (unwind-protect
+       (flet ((path (port)
+                (chan:chan-drain reply)
+                (chan:chan-send requests (list :path slot port))
+                (multiple-value-bind (msg ok) (chan:chan-receive reply :timeout 600) ; a first consensus fetch takes ~95 s on modus
+                  (cond ((not ok) (error "socks: the directory did not answer"))
+                        ((eq (first msg) :path) (mapcar #'dir:plain->relay (rest msg)))
+                        (t (error "socks: ~a" (second msg))))))
+              (guard-failed (g)
+                (chan:chan-send requests (list :guard-failed (dir:relay->plain g)) :timeout 5)))
+         (%handle (cl-transport.sockets:tcp-socket-from sock)
+                  :path-fn #'path :guard-failed-fn #'guard-failed))
+    (chan:chan-send free slot :timeout 5)))
+
+;;; ---- server: the directory owner + the accept loop ----------------------
+;;;
+;;; A DIRECTORY is the channels a connection uses to ask for paths: one REQUESTS channel and one
+;;; REPLY channel per connection slot.  Whoever calls SERVE-DIRECTORY on it is its OWNER and
+;;; holds the directory state.  RUN-PROXY makes one and serves it itself, between accepts --
+;;; unless it is handed one, when another thread serves it.  That split is for modus, where a
+;;; thread that is not main has a 16 MB heap and the consensus does not fit in it: there the
+;;; main thread serves the directory and RUN-PROXY's accept loop runs on a thread of its own.
+
+(defstruct (socks-directory (:constructor %make-directory (requests replies)))
+  requests replies)
+
+(defun make-directory (&key (slots 8))
+  "The channels of a directory with SLOTS connection slots.  Make it on the thread that will
+hand it out (and, on modus, serve it -- see above)."
+  (%make-directory (chan:make-chan :capacity 65536)
+                   (coerce (loop repeat slots collect (chan:make-chan :capacity 262144))
+                           'simple-vector)))
+
+(defun serve-directory-requests (dir)
+  "Answer every queued request on DIR, from this (the owner's) thread's directory state.
+The number answered."
+  (let ((n 0))
+    (loop
+      (multiple-value-bind (msg ok) (chan:chan-try-receive (socks-directory-requests dir))
+        (unless ok (return n))
+        (incf n)
+        (case (first msg)
+          (:path
+           (destructuring-bind (slot port) (rest msg)
+             (chan:chan-send (svref (socks-directory-replies dir) slot)
+                             (handler-case (cons :path (mapcar #'dir:relay->plain (%owner-path port)))
+                               (error (e) (list :error (princ-to-string e))))
+                             :timeout 5)))
+          (:guard-failed
+           (let* ((rsa (second (second msg)))
+                  (r (find rsa *relays* :key #'dir:relay-rsa-id :test #'equalp)))
+             (when r (ignore-errors (guard:guard-failed r))))))))))
+
+(defun load-directory ()
+  "Fetch, validate and parse the consensus into this thread's directory state now, rather than
+at the first connection.  The number of relays."
+  (length (setf *relays* (dir:consensus-relays))))
+
+(defun serve-directory (dir &key stop-p)
+  "Be DIR's owner: answer its requests until STOP-P (polled every 50 ms) returns true."
+  (loop until (and stop-p (funcall stop-p))
+        do (when (zerop (serve-directory-requests dir)) (sleep 0.05))))
+
+(defmacro %with-own-directory-state (&body body)
+  ;; This thread's own directory state: on modus a thread that is not main may not set the
+  ;; globals (and need not -- it is the only one that reads them).
+  `(let ((*relays* *relays*)
+         (guard::*guards* guard::*guards*)
+         (guard::*loaded* guard::*loaded*)
+         (dir::*consensus-cache* dir::*consensus-cache*)
+         (dir::*certs-cache* dir::*certs-cache*))
+     ,@body))
+
+(defun run-proxy (&key (host "127.0.0.1") (port 9050) (max-connections 8) on-listening stop-p
+                    directory)
+  "Run a SOCKS5 proxy on HOST:PORT, each connection over a fresh Tor circuit, on its own
+thread (at most MAX-CONNECTIONS at once; a further one is closed at once).  PORT 0 binds
+an ephemeral port; ON-LISTENING is called with the bound port.  Runs until STOP-P (a
+function, polled every 50 ms) returns true, or forever.  Any thread may run it.
+
+This thread is the directory's owner (see the file header) unless DIRECTORY is given -- a
+MAKE-DIRECTORY with at least MAX-CONNECTIONS slots that another thread serves with
+SERVE-DIRECTORY."
+  (let* ((dir (or directory (make-directory :slots max-connections)))
+         (own (null directory))
+         (server (cl-transport.sockets:tcp-listen :host host :port port))
+         (bound (cl-transport.sockets:tcp-listener-port server))
+         (free (chan:make-chan :capacity 4096)))
+    (dotimes (i (min max-connections (length (socks-directory-replies dir)))) (chan:chan-send free i))
+    (format t "[cl-tor] SOCKS5 proxy on ~a:~d~%" host bound) (finish-output)
+    (when on-listening (funcall on-listening bound))
+    (%with-own-directory-state
+      (unwind-protect
+           (loop until (and stop-p (funcall stop-p))
+                 do (when own (serve-directory-requests dir))
+                    (let ((app (cl-transport.sockets:tcp-accept server :timeout-ms 50)))
+                      (when app
+                        (multiple-value-bind (slot ok) (chan:chan-try-receive free)
+                          (if (not ok)
+                              (cl-transport.sockets:tcp-close app)
+                              (handler-case
+                                  (sb-thread:make-thread
+                                   #'%connection-main :name "cl-tor socks conn"
+                                   :arguments (list (cl-transport.sockets:tcp-socket-sock app)
+                                                    slot (socks-directory-requests dir)
+                                                    (svref (socks-directory-replies dir) slot) free))
+                                (error (e)
+                                  (format t "[socks] cannot start a connection: ~a~%" e)
+                                  (cl-transport.sockets:tcp-close app)
+                                  (chan:chan-send free slot :timeout 1))))))))
+        (cl-transport.sockets:tcp-listener-close server)))))

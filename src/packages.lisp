@@ -42,7 +42,7 @@
    #:fetch-microdesc #:enrich-relay #:enrich-relays
    #:relay #:relay-nickname #:relay-rsa-id #:relay-ip #:relay-or-port
    #:relay-flags #:relay-bandwidth #:relay-md-digest #:relay-exit-ports
-   #:relay-ntor-key #:relay-ed-id #:relay-has-flag
+   #:relay-ntor-key #:relay-ed-id #:relay-has-flag #:relay->plain #:plain->relay
    #:consensus-relays #:pick-relay #:pick-path
    #:*verify-consensus* #:validate-consensus #:fetch-certs #:exit-allows-port))
 
@@ -104,5 +104,7 @@
   (:local-nicknames (#:u #:cl-tor.util) (#:rc #:cl-tor.relay-crypto)
                     (#:dir #:cl-tor.directory) (#:link #:cl-tor.link)
                     (#:circ #:cl-tor.circuit) (#:strm #:cl-tor.stream)
-                    (#:guard #:cl-tor.guard) (#:bt #:bordeaux-threads))
-  (:export #:run-proxy #:build-fresh-circuit))
+                    (#:guard #:cl-tor.guard) (#:bt #:bordeaux-threads)
+                    (#:chan #:cl-transport.chan))
+  (:export #:run-proxy #:build-fresh-circuit
+           #:make-directory #:serve-directory #:serve-directory-requests #:load-directory))

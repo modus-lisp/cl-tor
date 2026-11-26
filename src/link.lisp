@@ -151,6 +151,9 @@ matched to the consensus RSA id.  Returns the Ed25519 identity, or signals."
   (let* ((bsd (cl-transport.sockets:tcp-socket-sock sock))
          (fd (sb-bsd-sockets:socket-file-descriptor bsd)))
     (seal::%make-transport
+     ;; the descriptor, so SEAL:TLS-STREAM-PENDING-P can tell "a cell is waiting" from "the
+     ;; read would block" -- the SOCKS splice reads the link only when it will not
+     :fd fd
      :sender (lambda (bytes)
                (let ((buf (coerce bytes '(simple-array (unsigned-byte 8) (*)))))
                  (sb-bsd-sockets:socket-send bsd buf (length buf)) t))

@@ -78,6 +78,22 @@
 
 (defun relay-has-flag (relay flag) (member flag (relay-flags relay) :test #'string=))
 
+;;; A RELAY AS PLAIN DATA, for a thread that did not make it.  On modus threads share no state:
+;;; a relay struct one thread built (and ENRICH-RELAY fills in) is that thread's, and another
+;;; thread gets one by MESSAGE -- a copy, through a channel that carries lists, strings and
+;;; octet vectors.  RELAY->PLAIN / PLAIN->RELAY are that copy's two ends.
+(defun relay->plain (r)
+  (list (relay-nickname r) (relay-rsa-id r) (relay-ip r) (relay-or-port r) (relay-flags r)
+        (relay-bandwidth r) (relay-md-digest r) (relay-ntor-key r) (relay-ed-id r)
+        (relay-exit-ports r) (relay-family r) (relay-family-ids r)))
+
+(defun plain->relay (p)
+  (destructuring-bind (nickname rsa-id ip or-port flags bandwidth md-digest ntor-key ed-id
+                       exit-ports family family-ids) p
+    (make-relay :nickname nickname :rsa-id rsa-id :ip ip :or-port or-port :flags flags
+                :bandwidth bandwidth :md-digest md-digest :ntor-key ntor-key :ed-id ed-id
+                :exit-ports exit-ports :family family :family-ids family-ids)))
+
 (defvar *consensus-cache* nil)
 
 (defun fetch-consensus (&key force)
