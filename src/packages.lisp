@@ -66,7 +66,7 @@
    #:link #:connect-link #:close-link
    #:link-relay #:link-version #:link-circid-len #:link-stream #:link-sock
    #:link-validated #:link-my-apparent-addr
-   #:send-cell #:recv-cell))
+   #:send-cell #:recv-cell #:link-input-ready-p #:*plain-links* #:*dial-host*))
 
 (defpackage #:cl-tor.relay-crypto
   (:use #:cl)
@@ -86,7 +86,8 @@
   (:export
    #:circuit #:circuit-link #:circuit-id #:circuit-hops #:circuit-length
    #:create-circuit #:extend-circuit #:build-circuit
-   #:send-relay #:recv-relay #:destroy-circuit))
+   #:send-relay #:recv-relay #:destroy-circuit
+   #:*deadline* #:with-deadline #:circuit-input-ready-p #:wait-relay-input))
 
 (defpackage #:cl-tor.stream
   (:use #:cl)
@@ -99,12 +100,23 @@
   (:local-nicknames (#:u #:cl-tor.util) (#:dir #:cl-tor.directory) (#:bt #:bordeaux-threads))
   (:export #:pick-guard #:guard-failed #:reset-guards #:*num-guards* #:*guard-lifetime*))
 
+(defpackage #:cl-tor.dirsvc
+  (:use #:cl)
+  (:local-nicknames (#:u #:cl-tor.util) (#:dir #:cl-tor.directory) (#:link #:cl-tor.link)
+                    (#:circ #:cl-tor.circuit) (#:guard #:cl-tor.guard) (#:bob #:bobbin))
+  (:export #:tor-directory #:make-directory #:%make-directory #:directory-requests
+           #:directory-replies #:directory-free #:directory-slots #:acquire-slot #:release-slot
+           #:serve-directory-requests #:serve-directory #:load-directory
+           #:with-own-directory-state #:owner-relays #:owner-hsdirs
+           #:define-directory-op #:dir-ask #:with-directory-client #:*client*
+           #:build-path-circuit #:circuit-to #:fresh-circuit))
+
 (defpackage #:cl-tor.socks
   (:use #:cl)
   (:local-nicknames (#:u #:cl-tor.util) (#:rc #:cl-tor.relay-crypto)
                     (#:dir #:cl-tor.directory) (#:link #:cl-tor.link)
                     (#:circ #:cl-tor.circuit) (#:strm #:cl-tor.stream)
                     (#:guard #:cl-tor.guard) (#:bt #:bordeaux-threads)
-                    (#:bob #:bobbin))
+                    (#:bob #:bobbin) (#:dsvc #:cl-tor.dirsvc))
   (:export #:run-proxy #:build-fresh-circuit
            #:make-directory #:serve-directory #:serve-directory-requests #:load-directory))

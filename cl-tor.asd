@@ -30,6 +30,7 @@
      (:file "relay-crypto") ; per-hop onion crypto (AES-CTR layers + SHA-1 digests)
      (:file "circuit")    ; CREATE2 + EXTEND2 circuit construction; relay cell send/recv
      (:file "stream")     ; RELAY_BEGIN/DATA/END streams over a circuit
+     (:file "dirsvc")     ; the directory owner + DIR-ASK: threads share no directory state
      (:file "socks")      ; local SOCKS5 proxy onto fresh circuits
      (:file "hs-dir")      ; v3 onion HSDir hash ring (time period, SRV, indices)
      (:file "hs-desc")     ; v3 descriptor 2-layer decrypt + intro points

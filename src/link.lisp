@@ -19,6 +19,16 @@
 
 (defvar *debug-certs* nil "When true, print why cert validation failed.")
 
+;;; TEST SEAMS, for a Tor network that runs on this machine (inspect/fake-tor-net.lisp): set
+;;; once, on the main thread, before any link is made; every thread reads them.
+(defvar *plain-links* nil
+  "When true, a link is plain TCP -- no TLS, so no cert binding: LINK-VALIDATED stays NIL --
+and otherwise the same VERSIONS / NETINFO handshake.  Only for a local test network.")
+(defvar *dial-host* nil
+  "When a string, every relay is dialled at this host (its port unchanged) instead of its
+consensus address -- a local test network's relays carry distinct /16s in the consensus (the
+path rules need them) and all listen on 127.0.0.1.")
+
 (defstruct (link (:constructor %make-link))
   relay sock stream conn version circid-len validated my-apparent-addr)
 
@@ -27,6 +37,16 @@
 
 (defun recv-cell (link)
   (cell:read-cell (link-stream link) (link-circid-len link)))
+
+(defun link-input-ready-p (link)
+  "Whether a cell can be read from LINK without waiting for the network: decrypted bytes in
+hand, TLS input pending, or (a plain link) bytes buffered or on the socket."
+  (let ((s (link-stream link)))
+    (if (typep s 'seal:tls-stream)
+        (seal:tls-stream-pending-p s)
+        (and (link-sock link)
+             (cl-transport.sockets:wait-readable (list (link-sock link)) 0)
+             t))))
 
 (defun close-link (link)
   (ignore-errors (close (link-stream link)))
@@ -172,10 +192,14 @@ matched to the consensus RSA id.  Returns the Ed25519 identity, or signals."
    is pure Common Lisp via seal (no OpenSSL / FFI); relays' self-signed certs are not
    CA-checked (:verify nil) — Tor binds identity through the CERTS cell instead."
   (let* ((ip (dir:relay-ip relay)) (port (dir:relay-or-port relay))
-         (sock (cl-transport.sockets:tcp-connect ip port :timeout-secs timeout))
-         (conn (seal:connect ip port :verify nil :timeout timeout
-                                     :transport (%seal-transport sock)))
-         (tls (seal:make-tls-stream conn))
+         (sock (cl-transport.sockets:tcp-connect (or *dial-host* ip) port :timeout-secs timeout))
+         (conn (unless *plain-links*
+                 (handler-case (seal:connect ip port :verify nil :timeout timeout
+                                                     :transport (%seal-transport sock))
+                   (error (e) (cl-transport.sockets:tcp-close sock) (error e)))))
+         (tls (if conn
+                  (seal:make-tls-stream conn)
+                  (cl-transport.sockets:tcp-socket-stream sock)))
          (link (%make-link :relay relay :sock sock :stream tls :conn conn :circid-len 2)))
     (handler-case
         (progn
@@ -202,7 +226,7 @@ matched to the consensus RSA id.  Returns the Ed25519 identity, or signals."
                   ((= cmd cell:+vpadding+))               ; ignore padding
                   (t (error "link: unexpected cell ~d during handshake" cmd)))))
             ;; 3. Validate the relay's Ed25519 cert chain against the TLS cert.
-            (let* ((leaf (first (seal:tls-connection-peer-certificates conn)))
+            (let* ((leaf (and conn (first (seal:tls-connection-peer-certificates conn))))
                    (fp (and leaf (c:sha256 (seal:certificate-raw leaf)))))
               (setf (link-validated link)
                     (and certs fp

@@ -64,8 +64,7 @@
 (defmethod sb-gray:stream-listen ((s tor-stream))
   (with-slots (circuit chunks eof closed) s
     (loop while (and (null chunks) (not eof) (not closed)
-                     (let ((tls (link:link-stream (circ:circuit-link circuit))))
-                       (and (typep tls 'seal:tls-stream) (seal:tls-stream-pending-p tls))))
+                     (circ:circuit-input-ready-p circuit))
           do (%read-cell s))
     (and chunks t)))
 

@@ -50,6 +50,43 @@
           (setf (circuit-hops circ) (list (rc:make-hop guard keys)))
           circ)))))
 
+;;; ---- waiting with a deadline ---------------------------------------------
+;;;
+;;; A wait bounded in time without a timer or a second thread (SB-EXT:WITH-TIMEOUT interrupts
+;;; the waiting thread from another; modus threads share nothing, so that is not ours to use):
+;;; while *DEADLINE* is set, RECV-RELAY reads a cell only once the link has input, and gives up
+;;; with an error when the deadline passes first.
+
+(defvar *deadline* nil
+  "An internal-real-time by which RECV-RELAY must have its cell, or NIL (no bound).")
+
+(defmacro with-deadline ((seconds) &body body)
+  "Run BODY with every RECV-RELAY bounded by SECONDS from now (the nearer of this and an
+enclosing deadline)."
+  (let ((d (gensym "DEADLINE")))
+    `(let* ((,d (+ (get-internal-real-time) (round (* ,seconds internal-time-units-per-second))))
+            (*deadline* (if *deadline* (min *deadline* ,d) ,d)))
+       ,@body)))
+
+(defun circuit-input-ready-p (circ)
+  "Whether a cell can be read from CIRC's link without waiting for the network."
+  (link:link-input-ready-p (circuit-link circ)))
+
+(defun wait-relay-input (circ &optional timeout)
+  "Wait until a cell can be read from CIRC: T, or NIL when TIMEOUT seconds (when given) or
+*DEADLINE* (when set) pass first.  With neither, waits for ever."
+  (let* ((lim (and timeout (+ (get-internal-real-time)
+                              (round (* timeout internal-time-units-per-second)))))
+         (end (cond ((and lim *deadline*) (min lim *deadline*)) (lim lim) (t *deadline*)))
+         (sock (link:link-sock (circuit-link circ))))
+    (loop
+      (when (circuit-input-ready-p circ) (return t))
+      (let ((left (and end (- end (get-internal-real-time)))))
+        (when (and left (<= left 0)) (return nil))
+        (cl-transport.sockets:wait-readable
+         (list sock)
+         (if left (max 1 (min 250 (round (* 1000 left) internal-time-units-per-second))) 250))))))
+
 ;;; ---- relay cell send / recv ---------------------------------------------
 
 (defun send-relay (circ relay-cmd stream-id data &key early (target (1- (circuit-length circ))))
@@ -93,6 +130,8 @@ flow control internally (decrements deliver windows, emits SENDMEs, and swallows
 incoming SENDMEs).  Returns (values hop-index relay-cmd stream-id length data)."
   (let ((hops (circuit-hops circ)))
     (loop
+      (when (and *deadline* (not (wait-relay-input circ)))
+        (error "circuit: timed out waiting for a relay cell"))
       (multiple-value-bind (cid cmd payload) (cell:read-cell (%stream circ) 4)
         (declare (ignore cid))
         (cond

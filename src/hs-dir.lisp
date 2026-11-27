@@ -12,8 +12,9 @@
                     (#:ed #:cl-tor.ed25519) (#:dir #:cl-tor.directory)
                     (#:circ #:cl-tor.circuit) (#:strm #:cl-tor.stream)
                     (#:rc #:cl-tor.relay-crypto) (#:link #:cl-tor.link)
-                    (#:guard #:cl-tor.guard))
-  (:export #:parse-consensus-header #:time-period-and-srv #:next-time-period-and-srv
+                    (#:guard #:cl-tor.guard) (#:dsvc #:cl-tor.dirsvc))
+  (:export #:fetch-descriptor-for #:hs-ring #:hs-periods
+           #:parse-consensus-header #:time-period-and-srv #:next-time-period-and-srv
            #:hsdir-index #:hs-index #:responsible-hsdirs
            #:onion->pubkey #:pubkey->onion #:fetch-descriptor
            #:build-circuit-to #:relay-pool #:hsdir-pool #:post-over-circuit
@@ -193,33 +194,53 @@
              (write-char (if (> n 1) (char +b64+ (logior (ash (logand b1 15) 2) (ash b2 -6))) #\=) s)
              (write-char (if (> n 2) (char +b64+ (logand b2 63)) #\=) s))))
 
+;;; --- the ring, asked of the directory owner ---------------------------------------
+;;;
+;;; The ring is built from the owner's HSDir relays (their ed25519 ids come from a batch of
+;;; microdescriptors), so the owner answers it: DSVC:DIR-ASK :HS-RING with the onion's
+;;; identity key returns the time period and the RESPONSIBLE HSDirs as plain relays.
+
+(defun %consensus-periods ()
+  "(values tp plen srv ntp nplen nsrv) from this thread's consensus (NTP NIL outside the
+overlap)."
+  (multiple-value-bind (va cur prev params) (parse-consensus-header (dir:fetch-consensus))
+    (multiple-value-bind (tp plen srv) (time-period-and-srv va cur prev params)
+      (multiple-value-bind (ntp nplen nsrv) (next-time-period-and-srv va cur prev params)
+        (values tp plen srv ntp nplen nsrv)))))
+
+(dsvc:define-directory-op :hs-ring (pubkey &optional next)
+  "(tp plen srv responsible-hsdirs) for the onion IDENTITY PUBKEY in the current time period --
+or, with NEXT, the next one (NIL outside the overlap, when its SRV is not known yet)."
+  (multiple-value-bind (tp plen srv ntp nplen nsrv) (%consensus-periods)
+    (when next (setf tp ntp plen nplen srv nsrv))
+    (when tp
+      (list tp plen srv
+            (mapcar #'dir:relay->plain
+                    (responsible-hsdirs pubkey (dsvc:owner-hsdirs) tp plen srv))))))
+
+(dsvc:define-directory-op :hs-periods ()
+  "(tp plen ntp): the current time period, its length, and the next one in the overlap."
+  (multiple-value-bind (tp plen srv ntp) (%consensus-periods)
+    (declare (ignore srv))
+    (list tp plen ntp)))
+
+(defun hs-ring (pubkey &optional next)
+  "(values tp plen srv hsdirs) -- the HSDirs as relay structs of this thread's own."
+  (destructuring-bind (&optional tp plen srv hsdirs) (dsvc:dir-ask :hs-ring pubkey next)
+    (values tp plen srv (mapcar #'dir:plain->relay hsdirs))))
+
+(defun hs-periods () (values-list (dsvc:dir-ask :hs-periods)))
+
 ;;; --- descriptor fetch over a circuit ----------------------------------------
 
-(defvar *relays-cache* nil)
-(defun %relays ()
-  (or *relays-cache* (setf *relays-cache* (dir:consensus-relays))))
-
-(defun %hsdirs (relays)
-  "HSDir+Running relays with ed25519 ids (batch-enriched); the ring nodes."
-  (let ((hs (remove-if-not (lambda (r) (and (dir:relay-has-flag r "HSDir")
-                                            (dir:relay-has-flag r "Running")))
-                           relays)))
-    (dir:enrich-relays hs)
-    (remove-if-not #'dir:relay-ed-id hs)))
+(defun %relays () (dsvc:owner-relays))
+(defun %hsdirs (relays) (declare (ignore relays)) (dsvc:owner-hsdirs))
 
 (defun %build-circuit-to (exit relays)
   "Build a 3-hop circuit whose exit is EXIT (a chosen, enriched relay), entering
-   through a persistent entry guard."
-  (dir:enrich-relay exit)
-  (let* ((guard (guard:pick-guard relays))
-         (middle (loop for m = (dir:pick-relay :relays relays)
-                       until (and (not (equalp (dir:relay-ed-id m) (dir:relay-ed-id exit)))
-                                  (not (equalp (dir:relay-rsa-id m) (dir:relay-rsa-id guard))))
-                       finally (return (dir:enrich-relay m))))
-         (lk (handler-case (link:connect-link guard)
-               (error (e) (guard:guard-failed guard) (error e)))))   ; guard down -> drop it
-    (handler-case (circ:build-circuit lk middle exit)
-      (error (e) (ignore-errors (link:close-link lk)) (error e)))))
+   through a persistent entry guard.  RELAYS is ignored: the path comes from the directory."
+  (declare (ignore relays))
+  (dsvc:circuit-to exit))
 
 (defconstant +r-begin-dir+ 13)
 
@@ -270,27 +291,32 @@
                   ((= rcmd rc:+r-end+) (return)))))
     (map 'string #'code-char (coerce out '(simple-array (unsigned-byte 8) (*))))))
 
+(defun %close-circuit (circ)
+  (when circ
+    (ignore-errors (circ:destroy-circuit circ))
+    (ignore-errors (link:close-link (circ:circuit-link circ)))))
+
+(defun fetch-descriptor-for (pubkey)
+  "Fetch the raw v3 descriptor text for the onion IDENTITY PUBKEY from a responsible HSDir
+   over a fresh Tor circuit built on this thread.  Returns (values text period-num
+   period-length).  The ring comes from the directory (DSVC:DIR-ASK)."
+  (multiple-value-bind (tp plen srv hsdirs) (hs-ring pubkey)
+    (declare (ignore srv))
+    (unless tp (error "no time period for the descriptor"))
+    (let ((path (format nil "/tor/hs/3/~a" (%base64-encode (ed:blind-public-key pubkey tp plen)))))
+      (dolist (hd hsdirs (error "no responsible HSDir served ~a" (pubkey->onion pubkey)))
+        (let ((circ nil))
+          (handler-case
+              (progn
+                (setf circ (dsvc:circuit-to hd))
+                (let ((body (map 'string #'code-char
+                                 (circ:with-deadline (60) (%fetch-over-circuit circ path)))))
+                  (%close-circuit circ)
+                  (when (search "hs-descriptor" body) (return (values body tp plen)))))
+            (serious-condition ()
+              (%close-circuit circ))))))))
+
 (defun fetch-descriptor (onion)
   "Fetch the raw v3 descriptor text for ONION from a responsible HSDir over a fresh
    Tor circuit.  Returns the descriptor string (starts with \"hs-descriptor 3\")."
-  (let* ((pubkey (onion->pubkey onion))
-         (relays (%relays))
-         (text (dir:fetch-consensus)))
-    (multiple-value-bind (va cur prev params) (parse-consensus-header text)
-      (multiple-value-bind (tp plen srv) (time-period-and-srv va cur prev params)
-        (let* ((hsdirs (%hsdirs relays))
-               (blinded (ed:blind-public-key pubkey tp plen))
-               (path (format nil "/tor/hs/3/~a" (%base64-encode blinded)))
-               (responsible (responsible-hsdirs pubkey hsdirs tp plen srv)))
-          (dolist (hd responsible (error "no responsible HSDir served ~a" onion))
-            (let ((circ nil))
-              (handler-case
-                  (progn
-                    (setf circ (%build-circuit-to hd relays))
-                    (let ((body (map 'string #'code-char (%fetch-over-circuit circ path))))
-                      (ignore-errors (circ:destroy-circuit circ))
-                      (ignore-errors (link:close-link (circ:circuit-link circ)))
-                      (when (search "hs-descriptor" body) (return body))))
-                (serious-condition ()
-                  (when circ (ignore-errors (circ:destroy-circuit circ))
-                        (ignore-errors (link:close-link (circ:circuit-link circ)))))))))))))
+  (values (fetch-descriptor-for (onion->pubkey onion))))

@@ -46,15 +46,16 @@ yet guarantee. No warranty (see [LICENSE](LICENSE)).
   control** (authenticated v1 circuit + stream); a local SOCKS5 proxy (host names
   resolved at the exit — no DNS leak), full-duplex in one readiness loop per
   connection.  Each connection is a thread of its own, started on a named function, that
-  owns its link and circuit and asks the proxy's directory owner for paths over a
-  channel (`bobbin`): threads share nothing, so `run-proxy` runs on any
+  owns its link and circuit and asks the **directory owner** for relays over a channel
+  (`bobbin`; `src/dirsvc.lisp`): threads share nothing, so `run-proxy` runs on any
   thread of SBCL or modus.  On modus a non-main thread's heap is 16 MB, which the
   consensus does not fit, so there the main thread serves the directory
   (`make-directory`, `serve-directory`, `run-proxy :directory`) while the proxy accepts
   elsewhere.  `inspect/proxy-live-test.lisp` (live network) checks both shapes.
   A CONNECT to a `.onion` name goes to the onion service (introduce + rendezvous,
-  `connect-onion`) instead of an exit; a failure answers Tor's extended reply `0xF2`.
-  (Not yet on modus: `connect-onion` keeps directory state on the connection thread.)
+  `connect-onion`) instead of an exit — on modus too: `connect-onion` asks the directory
+  owner for the time period, the responsible HSDirs and its relays, and builds every
+  circuit on the connection's own thread; a failure answers Tor's extended reply `0xF2`.
   *Live: `curl` through it reports `{"IsTor":true}`; 10 MB downloads complete and
   the daemon stays up.*
 - **Hardening** ✅ — entry-guard **persistence** (one stable guard, saved to
@@ -75,6 +76,20 @@ yet guarantee. No warranty (see [LICENSE](LICENSE)).
   cross-cert (curve25519→ed25519) is byte-verified against real descriptors, so the
   service is valid for **any** Tor client. *Live: `run-service` publishes to the real
   HSDirs and our own client connects back end to end; validated against stock Tor.*
+  The service belongs to the directory's owner (`start-service`, then `service-step`
+  every so often; `run-service` / `serve-service` do the stepping); each intro point,
+  each rendezvous and each publish is a thread of its own on a named function, reporting
+  back by message — so it runs on modus as on SBCL.  An inbound stream is spliced to a
+  local TCP `:target` (Tor's `HiddenServicePort`) or handed to a `:handler` function on
+  its rendezvous thread.
+
+**Offline, end to end.** `inspect/run-onion-local.sh sbcl|modus` runs
+`inspect/onion-local-test.lisp` against `inspect/fake-tor-net.lisp`: a directory
+authority and nine relays on 127.0.0.1 speaking the real protocol (ntor, relay crypto,
+EXTEND2, BEGIN_DIR, intro points, rendezvous joins) over plain TCP
+(`link:*plain-links*`, `link:*dial-host*`).  The proxy reaches an exit, an onion
+service comes up and publishes, and two `.onion` connections through the proxy reach its
+local backend — 13 checks, the same on both Lisps.
 
 ## Roadmap
 
@@ -113,6 +128,7 @@ src/
   relay-crypto          per-hop onion crypto (AES-CTR + running digest)
   circuit               CREATE2 / EXTEND2 + relay cell send/recv
   stream                RELAY_BEGIN/DATA/END streams
+  dirsvc                the directory owner + DIR-ASK (threads share no directory state)
   socks                 local SOCKS5 proxy onto fresh circuits
   hs-dir                v3 onion HSDir hash ring (time period, SRV, indices)
   hs-desc               v3 descriptor two-layer decrypt + intro points
@@ -122,6 +138,9 @@ src/
 inspect/
   offline-test.lisp     crypto + ntor gate
   run-all.sh            run it
+  fake-tor-net.lisp     a Tor network on 127.0.0.1 (directory + 9 relays), for:
+  onion-local-test.lisp proxy, onion client and hosting end to end, offline
+  run-onion-local.sh    run it on sbcl or modus
 ```
 
 ## Dependencies
@@ -134,7 +153,9 @@ Quicklisp's `usocket` and `bordeaux-threads`.  The crypto is isolated in
 
 ```sh
 inspect/run-all.sh
-# === 33 passed, 0 failed ===
+# === 56 passed, 0 failed ===
+inspect/run-onion-local.sh sbcl        # or: MODUS=path/to/modus inspect/run-onion-local.sh modus
+# checks: 13   failures: 0   => PASS
 ```
 
 Run the proxy and route a request through Tor:
