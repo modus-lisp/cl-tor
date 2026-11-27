@@ -39,7 +39,7 @@
            #:run-service #:republish-service #:*num-intro-points*
            #:start-service #:service-step #:serve-service #:stop-service
            #:service-directory #:service-published #:service-accepted #:service-live-count
-           #:service-onion #:service-rendezvous-count #:service-stopped-p
+           #:service-onion #:service-rendezvous-count #:service-stopped-p #:service-intro-count
            #:*intro-lifetime* #:*republish-interval*))
 
 (in-package #:cl-tor.hshost)
@@ -278,6 +278,10 @@
 (defun service-live (service)
   (loop for r in (service-intros service) when (eq (irec-state r) :live) collect (irec-intro r)))
 (defun service-live-count (service) (length (service-live service)))
+(defun service-intro-count (service)
+  "Intro points whose threads are running (starting or live): 0 once a stopped service's
+   threads have all ended (as SERVICE-STEP reads their reports)."
+  (length (service-intros service)))
 (defun service-rendezvous-count (service) (service-rendezvous service))
 (defun service-stopped-p (service) (service-stopped service))
 
