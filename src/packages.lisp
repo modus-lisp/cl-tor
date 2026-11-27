@@ -105,6 +105,6 @@
                     (#:dir #:cl-tor.directory) (#:link #:cl-tor.link)
                     (#:circ #:cl-tor.circuit) (#:strm #:cl-tor.stream)
                     (#:guard #:cl-tor.guard) (#:bt #:bordeaux-threads)
-                    (#:chan #:cl-transport.chan))
+                    (#:bob #:bobbin))
   (:export #:run-proxy #:build-fresh-circuit
            #:make-directory #:serve-directory #:serve-directory-requests #:load-directory))

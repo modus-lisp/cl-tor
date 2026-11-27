@@ -154,17 +154,17 @@ its buffers are this thread's); the directory is asked over REQUESTS, answers ar
 REPLY; SLOT goes back on FREE at the end."
   (unwind-protect
        (flet ((path (port)
-                (chan:chan-drain reply)
-                (chan:chan-send requests (list :path slot port))
-                (multiple-value-bind (msg ok) (chan:chan-receive reply :timeout 600) ; a first consensus fetch takes ~95 s on modus
+                (bob:channel-drain reply)
+                (bob:channel-send requests (list :path slot port))
+                (multiple-value-bind (msg ok) (bob:channel-receive reply :timeout 600) ; a first consensus fetch takes ~95 s on modus
                   (cond ((not ok) (error "socks: the directory did not answer"))
                         ((eq (first msg) :path) (mapcar #'dir:plain->relay (rest msg)))
                         (t (error "socks: ~a" (second msg))))))
               (guard-failed (g)
-                (chan:chan-send requests (list :guard-failed (dir:relay->plain g)) :timeout 5)))
+                (bob:channel-send requests (list :guard-failed (dir:relay->plain g)) :timeout 5)))
          (%handle (cl-transport.sockets:tcp-socket-from sock)
                   :path-fn #'path :guard-failed-fn #'guard-failed))
-    (chan:chan-send free slot :timeout 5)))
+    (bob:channel-send free slot :timeout 5)))
 
 ;;; ---- server: the directory owner + the accept loop ----------------------
 ;;;
@@ -181,8 +181,8 @@ REPLY; SLOT goes back on FREE at the end."
 (defun make-directory (&key (slots 8))
   "The channels of a directory with SLOTS connection slots.  Make it on the thread that will
 hand it out (and, on modus, serve it -- see above)."
-  (%make-directory (chan:make-chan :capacity 65536)
-                   (coerce (loop repeat slots collect (chan:make-chan :capacity 262144))
+  (%make-directory (bob:make-channel :capacity 65536)
+                   (coerce (loop repeat slots collect (bob:make-channel :capacity 262144))
                            'simple-vector)))
 
 (defun serve-directory-requests (dir)
@@ -190,13 +190,13 @@ hand it out (and, on modus, serve it -- see above)."
 The number answered."
   (let ((n 0))
     (loop
-      (multiple-value-bind (msg ok) (chan:chan-try-receive (socks-directory-requests dir))
+      (multiple-value-bind (msg ok) (bob:channel-try-receive (socks-directory-requests dir))
         (unless ok (return n))
         (incf n)
         (case (first msg)
           (:path
            (destructuring-bind (slot port) (rest msg)
-             (chan:chan-send (svref (socks-directory-replies dir) slot)
+             (bob:channel-send (svref (socks-directory-replies dir) slot)
                              (handler-case (cons :path (mapcar #'dir:relay->plain (%owner-path port)))
                                (error (e) (list :error (princ-to-string e))))
                              :timeout 5)))
@@ -239,8 +239,8 @@ SERVE-DIRECTORY."
          (own (null directory))
          (server (cl-transport.sockets:tcp-listen :host host :port port))
          (bound (cl-transport.sockets:tcp-listener-port server))
-         (free (chan:make-chan :capacity 4096)))
-    (dotimes (i (min max-connections (length (socks-directory-replies dir)))) (chan:chan-send free i))
+         (free (bob:make-channel :capacity 4096)))
+    (dotimes (i (min max-connections (length (socks-directory-replies dir)))) (bob:channel-send free i))
     (format t "[cl-tor] SOCKS5 proxy on ~a:~d~%" host bound) (finish-output)
     (when on-listening (funcall on-listening bound))
     (%with-own-directory-state
@@ -249,7 +249,7 @@ SERVE-DIRECTORY."
                  do (when own (serve-directory-requests dir))
                     (let ((app (cl-transport.sockets:tcp-accept server :timeout-ms 50)))
                       (when app
-                        (multiple-value-bind (slot ok) (chan:chan-try-receive free)
+                        (multiple-value-bind (slot ok) (bob:channel-try-receive free)
                           (if (not ok)
                               (cl-transport.sockets:tcp-close app)
                               (handler-case
@@ -261,5 +261,5 @@ SERVE-DIRECTORY."
                                 (error (e)
                                   (format t "[socks] cannot start a connection: ~a~%" e)
                                   (cl-transport.sockets:tcp-close app)
-                                  (chan:chan-send free slot :timeout 1))))))))
+                                  (bob:channel-send free slot :timeout 1))))))))
         (cl-transport.sockets:tcp-listener-close server)))))

@@ -9,7 +9,7 @@
   :license "MIT"
   :depends-on ("natrium"             ; crypto primitives (SHA-1/256/512, SHA-3, SHAKE, HMAC, AES-CTR, X25519, Ed25519)
                "cl-transport/sockets" ; TCP to relay ORPorts + directory HTTP (the org's sockets, not usocket)
-               "cl-transport/chan"  ; copying channels between threads that share no state (socks)
+               "bobbin"  ; copying channels between threads that share no state (socks)
                "seal"               ; pure-CL TLS 1.3 link layer (no OpenSSL/FFI)
                "cram"                ; zlib inflate (directory documents are compressed)
                "bordeaux-threads")   ; per-circuit read loops

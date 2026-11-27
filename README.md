@@ -47,7 +47,7 @@ yet guarantee. No warranty (see [LICENSE](LICENSE)).
   resolved at the exit — no DNS leak), full-duplex in one readiness loop per
   connection.  Each connection is a thread of its own, started on a named function, that
   owns its link and circuit and asks the proxy's directory owner for paths over a
-  channel (`cl-transport/chan`): threads share nothing, so `run-proxy` runs on any
+  channel (`bobbin`): threads share nothing, so `run-proxy` runs on any
   thread of SBCL or modus.  On modus a non-main thread's heap is 16 MB, which the
   consensus does not fit, so there the main thread serves the directory
   (`make-directory`, `serve-directory`, `run-proxy :directory`) while the proxy accepts
