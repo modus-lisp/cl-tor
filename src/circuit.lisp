@@ -124,12 +124,19 @@ circuit-level SENDME is authenticated (v1) with the boundary cell's digest."
       (send-relay circ rc:+r-sendme+ sid (u:octets 0))    ; stream SENDME is v0 (empty)
       (incf (car sw) +stream-inc+))))
 
-(defun recv-relay (circ)
+(defun recv-relay (circ &key poll)
   "Read cells until one decrypts to a recognized, deliverable relay cell.  Handles
 flow control internally (decrements deliver windows, emits SENDMEs, and swallows
-incoming SENDMEs).  Returns (values hop-index relay-cmd stream-id length data)."
+incoming SENDMEs).  Returns (values hop-index relay-cmd stream-id length data).
+
+With POLL, read only what the link already has: NIL once it has no more input and no
+deliverable relay cell came of it (the link carried padding, a SENDME, ...).  A loop that
+waits for input and then reads must poll: relays send PADDING cells, so link input is not
+a relay cell."
   (let ((hops (circuit-hops circ)))
     (loop
+      (when (and poll (not (circuit-input-ready-p circ)))
+        (return-from recv-relay nil))
       (when (and *deadline* (not (wait-relay-input circ)))
         (error "circuit: timed out waiting for a relay cell"))
       (multiple-value-bind (cid cmd payload) (cell:read-cell (%stream circ) 4)

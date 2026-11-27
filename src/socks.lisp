@@ -93,8 +93,11 @@ that would not connect."
     (if (eq first :eof) :eof
         (let ((buf (make-array max :element-type '(unsigned-byte 8) :fill-pointer 0)))
           (vector-push first buf)
+          ;; READ-BYTE with an EOF value: LISTEN may answer T at end of file (modus main
+          ;; 48372f38 does), and the bytes before the EOF must still be passed on
           (loop while (and (< (fill-pointer buf) max) (listen stream))
-                do (vector-push (read-byte stream) buf))
+                do (let ((b (read-byte stream nil nil)))
+                     (if b (vector-push b buf) (return))))
           (coerce buf '(simple-array (unsigned-byte 8) (*)))))))
 
 (defun %tor-ready-p (circ)
@@ -115,9 +118,10 @@ every 50 ms) returning true."
           (let ((did nil))
             (when (%tor-ready-p circ)
               (setf did t)
-              (multiple-value-bind (hop rcmd rsid len data) (circ:recv-relay circ)
+              (multiple-value-bind (hop rcmd rsid len data) (circ:recv-relay circ :poll t)
                 (declare (ignore hop len))
-                (cond ((and (= rcmd rc:+r-data+) (eql rsid sid))
+                (cond ((null rcmd))                             ; padding / SENDME only
+                      ((and (= rcmd rc:+r-data+) (eql rsid sid))
                        (write-sequence data app) (force-output app))
                       ((and (= rcmd rc:+r-end+) (eql rsid sid)) (return)))))
             (when (cl-transport.sockets:wait-readable (list app-sock) 0)

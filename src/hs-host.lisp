@@ -313,9 +313,9 @@
                    (when (or (%stopped-p id) (> (get-universal-time) end)) (return))
                    (when (circ:wait-relay-input circ 1)
                      (multiple-value-bind (hop rcmd rsid len data)
-                         (circ:with-deadline (30) (circ:recv-relay circ))
+                         (circ:with-deadline (30) (circ:recv-relay circ :poll t))
                        (declare (ignore hop rsid len))
-                       (when (= rcmd +r-introduce2+)
+                       (when (eql rcmd +r-introduce2+)
                          (%start-rendezvous id dir requests replies free events data intro-plain
                                             seed target handler)))))))
            (serious-condition (e) (setf why (princ-to-string e))))

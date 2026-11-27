@@ -18,7 +18,7 @@
 ;;;;   C. a SOCKS CONNECT to that .onion, through the same proxy: CONNECT-ONION on the
 ;;;;      connection thread (descriptor fetch, introduce, rendezvous) meets the service's
 ;;;;      rendezvous thread, and bytes go client -> service -> backend -> back; twice, the
-;;;;      second while the first is still open
+;;;;      second while the first is still open; a third whose backend answers and closes at once
 ;;;;   D. a .onion nobody serves answers SOCKS 0xF2 (introduction failed); stopping ends every
 ;;;;      thread and closes the proxy's port
 ;;;;
@@ -133,7 +133,11 @@ upper-cased, several connections at once, until a message on STOP-CHAN."
                             (progn (sock:tcp-close ts) (setf conns (remove ts conns)))
                             (let ((s (sock:tcp-socket-stream ts)))
                               (write-sequence (%bytes (string-upcase (%string got))) s)
-                              (finish-output s)))))))
+                              (finish-output s)
+                              ;; "bye": answer, then close at once -- the answer must still
+                              ;; reach the client (the splice reads up to the EOF)
+                              (when (search "bye" (%string got))
+                                (sock:tcp-close ts) (setf conns (remove ts conns)))))))))
       (dolist (ts conns) (ignore-errors (sock:tcp-close ts)))
       (sock:tcp-listener-close l))))
 
@@ -224,8 +228,11 @@ upper-cased, several connections at once, until a message on STOP-CHAN."
       (multiple-value-bind (code data) (client-result (start-client proxy-port onion 80 "second stream") 900)
         (check "C: a second .onion connection while the first is open" (eql code 0) code)
         (check "C: its bytes go through too" (equal data "SECOND STREAM") data))
+      (multiple-value-bind (code data) (client-result (start-client proxy-port onion 80 "answer and bye") 900)
+        (check "C: a backend that answers and closes at once: the answer arrives" (eql code 0) code)
+        (check "C: ... all of it" (equal data "ANSWER AND BYE") data))
       (bob:channel-send hold1 :done))
-    (check "C: the service accepted both rendezvous" (= 2 (host:service-rendezvous-count *service*))
+    (check "C: the service accepted all three rendezvous" (= 3 (host:service-rendezvous-count *service*))
            (host:service-rendezvous-count *service*))
 
     ;; D. an onion nobody serves; then stop everything

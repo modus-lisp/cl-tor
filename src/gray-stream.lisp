@@ -32,13 +32,15 @@
    (eof     :initform nil)    ; far end sent RELAY_END (or the circuit failed)
    (closed  :initform nil)))
 
-(defun %read-cell (s)
-  "Read one relay cell from S's circuit (waiting for it) and file what it carries."
+(defun %read-cell (s &optional poll)
+  "Read one relay cell from S's circuit (waiting for it; with POLL, only what the link has
+already) and file what it carries."
   (with-slots (circuit sid chunks eof) s
     (handler-case
-        (multiple-value-bind (hop rcmd rsid len data) (circ:recv-relay circuit)
+        (multiple-value-bind (hop rcmd rsid len data) (circ:recv-relay circuit :poll poll)
           (declare (ignore hop len))
           (cond
+            ((null rcmd))                                 ; padding / SENDME only
             ((and (= rcmd rc:+r-data+) (or (null rsid) (= rsid sid)))
              (setf chunks (nconc chunks (list data))))
             ((and (= rcmd rc:+r-end+) (eql rsid sid))
@@ -65,7 +67,7 @@
   (with-slots (circuit chunks eof closed) s
     (loop while (and (null chunks) (not eof) (not closed)
                      (circ:circuit-input-ready-p circuit))
-          do (%read-cell s))
+          do (%read-cell s t))
     (and chunks t)))
 
 (defmethod sb-gray:stream-read-byte ((s tor-stream))
