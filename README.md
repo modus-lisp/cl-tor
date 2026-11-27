@@ -52,6 +52,9 @@ yet guarantee. No warranty (see [LICENSE](LICENSE)).
   consensus does not fit, so there the main thread serves the directory
   (`make-directory`, `serve-directory`, `run-proxy :directory`) while the proxy accepts
   elsewhere.  `inspect/proxy-live-test.lisp` (live network) checks both shapes.
+  A CONNECT to a `.onion` name goes to the onion service (introduce + rendezvous,
+  `connect-onion`) instead of an exit; a failure answers Tor's extended reply `0xF2`.
+  (Not yet on modus: `connect-onion` keeps directory state on the connection thread.)
   *Live: `curl` through it reports `{"IsTor":true}`; 10 MB downloads complete and
   the daemon stays up.*
 - **Hardening** ✅ — entry-guard **persistence** (one stable guard, saved to

@@ -25,6 +25,15 @@
 
 (defvar *relays* nil "Cached consensus relay list (loaded on first use).")
 
+(defvar *onion-connect* nil
+  "The v3 onion-service client (CL-TOR.HS-INTRO:CONNECT-ONION, which sets this when it loads:
+it comes later in the system), so a CONNECT to a .onion name goes to the service through a
+rendezvous rather than to an exit.  Called as (funcall it onion :port port) => circuit, stream.")
+
+(defun %onion-name-p (host)
+  (let ((n (length host)))
+    (and (> n 6) (string-equal ".onion" host :start2 (- n 6)))))
+
 (defun %owner-path (port)
   "A (guard middle exit) path from this thread's own directory state."
   (unless *relays* (setf *relays* (dir:consensus-relays)))
@@ -132,6 +141,20 @@ Ends on the client's EOF, the exit's RELAY_END, or an error either way."
              (let ((s (cl-transport.sockets:tcp-socket-stream app-sock)))
                (%socks-handshake s)
                (multiple-value-bind (host port) (%read-request s)
+                 (when (%onion-name-p host)
+                   ;; an onion service: introduce + rendezvous, the stream is on that circuit
+                   (multiple-value-bind (c sid)
+                       (handler-case (if *onion-connect*
+                                         (funcall *onion-connect* host :port port)
+                                         (error "no onion-service client"))
+                         (error (e)
+                           (format t "[socks] CONNECT ~a:~d failed: ~a~%" host port e) (finish-output)
+                           (%reply s #xF2) (return-from %handle)))   ; Tor: introduction failed
+                     (setf circ c)
+                     (%reply s 0)
+                     (format t "[socks] CONNECT ~a:~d (onion service)~%" host port) (finish-output)
+                     (%splice app-sock circ sid)
+                     (return-from %handle)))
                  (setf circ (build-fresh-circuit :port port :path-fn path-fn
                                                  :guard-failed-fn guard-failed-fn))
                  (handler-case (strm:begin-stream circ host port)

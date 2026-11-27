@@ -226,3 +226,6 @@
                          (%teardown (getf result :rend-circ))   ; clean up the failed try
                          (format *error-output* "  onion try ~d/~d failed: ~a~%" try max-tries e))))
                 finally (error "connect-onion: ~a unreachable after ~d tries" onion max-tries)))))))
+
+;; cl-tor's SOCKS proxy (socks.lisp, loaded before this file) dials .onion names through this
+(setf cl-tor.socks::*onion-connect* 'connect-onion)
