@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# inspect/run-onion-local.sh [sbcl|modus] -- inspect/onion-local-test.lisp against a fake Tor
+# inspect/run-onion-local.sh [sbcl|modus] [TEST] -- TEST (default inspect/onion-local-test.lisp;
+# also inspect/tor-transport-local-test.lisp) against a fake Tor
 # network (inspect/fake-tor-net.lisp, always on SBCL) on 127.0.0.1.  MODUS names the modus
 # binary (default: modus on PATH).  Nothing listens after it returns.
 set -u
 here=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 who=${1:-sbcl}
+test=${2:-inspect/onion-local-test.lisp}
 work=$(mktemp -d "${TMPDIR:-/tmp}/cl-tor-onion.XXXXXX")
 # This tree and the one above it (seal, cl-transport, bobbin ... are sibling repos), unless
 # the caller set a registry.
@@ -18,9 +20,9 @@ if [ ! -s "$portfile" ]; then echo "the fake network did not start"; cat "$work/
 export FAKE_TOR="$(cat "$portfile")"
 cd "$here"
 if [ "$who" = modus ]; then
-  "${MODUS:-modus}" --script inspect/onion-local-test.lisp; rc=$?
+  "${MODUS:-modus}" --script "$test"; rc=$?
 else
-  sbcl --script inspect/onion-local-test.lisp; rc=$?
+  sbcl --script "$test"; rc=$?
 fi
 rm -f "$portfile"; wait $fake
 [ -n "${KEEP_FAKE_LOG:-}" ] && cat "$work/fake.log"

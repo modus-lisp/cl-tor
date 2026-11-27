@@ -9,7 +9,8 @@
   (:use #:cl)
   (:local-nicknames (#:tsocks #:cl-tor.socks) (#:strm #:cl-tor.stream)
                     (#:gs #:cl-tor.gray-stream) (#:circ #:cl-tor.circuit)
-                    (#:link #:cl-tor.link) (#:intro #:cl-tor.hs-intro))
+                    (#:link #:cl-tor.link) (#:intro #:cl-tor.hs-intro)
+                    (#:dsvc #:cl-tor.dirsvc))
   (:export #:dial-over-tor))
 
 (in-package #:cl-tor.transport)
@@ -34,8 +35,15 @@
    onion-service client (fetch+decrypt descriptor, introduce, rendezvous); any other
    HOST gets a fresh 3-hop circuit to an exit permitting PORT.  Either way the open
    stream is wrapped as a binary gray stream.  Returns (values stream closer).
-   (TIMEOUT is advisory — circuit build has its own bounded retries.)"
+   (TIMEOUT is advisory — circuit build has its own bounded retries.)
+
+   Any thread may dial: the directory is asked of the owner that shared it
+   (CL-TOR.DIRSVC:SHARE-DIRECTORY), through a slot held for the dial; the circuit and the
+   stream are this thread's.  With no shared directory, this thread's own state is used."
   (declare (ignore timeout))
+  (dsvc:with-shared-directory () (%dial host port)))
+
+(defun %dial (host port)
   (if (%onion-p host)
       (multiple-value-bind (circ sid) (intro:connect-onion host :port port)
         (%wrap circ sid))

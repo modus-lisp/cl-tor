@@ -207,6 +207,45 @@ client bound (see WITH-DIRECTORY-CLIENT), the answer from this thread's own stat
                 ((eq (first msg) :ok) (second msg))
                 (t (error "directory: ~a" (second msg))))))))
 
+;;; ---- the shared directory: for code that is handed no slot ------------------------------
+;;;
+;;; A caller with no directory of its own (cl-transport's :TOR backend, DIAL-OVER-TOR, on any
+;;; thread) reaches the owner through the SHARED directory: the owner registers one with
+;;; SHARE-DIRECTORY, and WITH-SHARED-DIRECTORY takes a free slot of it for the extent of its
+;;; body.  The global is set on the owner only; other threads only read it.
+
+(defvar *shared-directory* nil
+  "The directory threads with none of their own ask (SHARE-DIRECTORY), or NIL.")
+
+(defvar *shared-owner* nil "The thread that shared *SHARED-DIRECTORY* (its owner).")
+
+(defun share-directory (dir)
+  "Make DIR (a MAKE-DIRECTORY this thread serves) the one threads without a directory of their
+own ask.  NIL withdraws it.  Call it on the owner."
+  (setf *shared-owner* (and dir sb-thread:*current-thread*)
+        *shared-directory* dir))
+
+(defun call-with-shared-directory (fn &key (timeout 600))
+  "Call FN with DIR-ASK reaching the shared directory's owner, through a free slot held for
+the call -- unless this thread already asks an owner, there is no shared directory, or this
+thread is the owner (then FN runs as it is, on this thread's own state)."
+  (let ((dir *shared-directory*))
+    (if (or *client* (null dir) (null (directory-free dir))
+            (eq sb-thread:*current-thread* *shared-owner*))
+        (funcall fn)
+        (let ((end (+ (get-universal-time) timeout)) (slot nil))
+          (loop (setf slot (acquire-slot dir))
+                (when slot (return))
+                (when (> (get-universal-time) end)
+                  (error "directory: no free slot in ~d s" timeout))
+                (sleep 0.05))
+          (unwind-protect (with-directory-client (dir slot) (funcall fn))
+            (release-slot dir slot))))))
+
+(defmacro with-shared-directory ((&key (timeout 600)) &body body)
+  "Run BODY with DIR-ASK reaching the shared directory's owner (CALL-WITH-SHARED-DIRECTORY)."
+  `(call-with-shared-directory (lambda () ,@body) :timeout ,timeout))
+
 ;;; ---- circuits, built on the asking thread ---------------------------------------------
 
 (defun build-path-circuit (path)

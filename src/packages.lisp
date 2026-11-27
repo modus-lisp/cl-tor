@@ -109,7 +109,9 @@
            #:serve-directory-requests #:serve-directory #:load-directory
            #:with-own-directory-state #:owner-relays #:owner-hsdirs
            #:define-directory-op #:dir-ask #:with-directory-client #:*client*
-           #:build-path-circuit #:circuit-to #:fresh-circuit))
+           #:build-path-circuit #:circuit-to #:fresh-circuit
+           #:share-directory #:*shared-directory* #:with-shared-directory
+           #:call-with-shared-directory))
 
 (defpackage #:cl-tor.socks
   (:use #:cl)

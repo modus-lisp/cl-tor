@@ -89,7 +89,10 @@ authority and nine relays on 127.0.0.1 speaking the real protocol (ntor, relay c
 EXTEND2, BEGIN_DIR, intro points, rendezvous joins) over plain TCP
 (`link:*plain-links*`, `link:*dial-host*`).  The proxy reaches an exit, an onion
 service comes up and publishes, and two `.onion` connections through the proxy reach its
-local backend — 13 checks, the same on both Lisps.
+local backend — 13 checks, the same on both Lisps.  `inspect/run-onion-local.sh sbcl|modus
+inspect/tor-transport-local-test.lisp` dials over cl-transport's `:tor` (cl-tor-transport)
+from worker threads, which borrow a slot of the directory the owner shared
+(`dsvc:share-directory`) — an exit target and the .onion, one at a time and at once.
 
 ## Roadmap
 
