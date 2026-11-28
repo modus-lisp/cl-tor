@@ -126,11 +126,18 @@
   (let ((body (u:ascii->bytes text)) (ok 0))
     (dolist (hd hsdirs ok)
       (let ((circ nil))
-        (ignore-errors
-          (setf circ (dsvc:circuit-to hd))
-          (when (search "200" (circ:with-deadline (60)
-                                (hsdir:post-over-circuit circ "/tor/hs/3/publish" body)))
-            (incf ok)))
+        (handler-case
+            ;; one deadline for the whole upload, circuit build included: a relay that
+            ;; accepts a cell and never answers must not hold the publish for ever
+            (circ:with-deadline (90)
+              (setf circ (dsvc:circuit-to hd))
+              (let ((reply (hsdir:post-over-circuit circ "/tor/hs/3/publish" body)))
+                (if (search " 200" reply)
+                    (incf ok)
+                    (%log "HSDir ~a refused the descriptor: ~a" (dir:relay-nickname hd)
+                          (subseq reply 0 (min 60 (length reply)))))))
+          (serious-condition (e)
+            (%log "upload to HSDir ~a failed: ~a" (dir:relay-nickname hd) e)))
         (%teardown circ)))))
 
 (defun publish-descriptor (pubkey desc-text relays period-num period-length srv)
@@ -288,7 +295,9 @@
 (defun %stopped-p (id) (and (member id *stopped-services*) t))
 (defun %event (events msg) (ignore-errors (bob:channel-send events msg :timeout 5)))
 (defun %log (fmt &rest args)
-  (format *error-output* "~&[hs-host] ~?~%" fmt args) (finish-output *error-output*))
+  (multiple-value-bind (sec min hour) (decode-universal-time (get-universal-time) 0)
+    (format *error-output* "~&[hs-host ~2,'0d:~2,'0d:~2,'0d] ~?~%" hour min sec fmt args))
+  (finish-output *error-output*))
 
 (defun %thread-directory (requests replies free)
   (dsvc:%make-directory requests replies free))
@@ -361,11 +370,25 @@
                              (cl-tor.socks::%splice app rend sid
                                                     :stop-p (lambda () (%stopped-p id)))
                           (sock:tcp-close app))
-                        (ignore-errors (strm:end-stream rend sid))))
+                        (ignore-errors (strm:end-stream rend sid))
+                        (%linger rend sid 30)))
                      (handler (funcall handler rend sid))))))
            (serious-condition (e) (%log "rendezvous: ~a" e)))
       (%teardown rend)
       (dsvc:release-slot dir slot))))
+
+(defun %linger (circ sid seconds)
+  "After our RELAY_END on stream SID, keep CIRC open until the client ends the stream or the
+   circuit, or SECONDS pass.  Destroying it at once loses the stream's last DATA cells: a
+   DESTROY overtakes them at the rendezvous point (measured on the live network: the client
+   got CONNECTED and then nothing, about half the time)."
+  (let ((end (+ (get-universal-time) seconds)))
+    (ignore-errors
+      (loop while (< (get-universal-time) end)
+            do (when (circ:wait-relay-input circ 1)
+                 (multiple-value-bind (hop rcmd rsid) (circ:recv-relay circ :poll t)
+                   (declare (ignore hop))
+                   (when (and (eql rcmd rc:+r-end+) (eql rsid sid)) (return))))))))
 
 ;;; --- a publish's thread ---
 
@@ -461,6 +484,8 @@
              :arguments (list slot (dsvc:directory-requests dir)
                               (coerce (dsvc:directory-replies dir) 'list)
                               (dsvc:directory-free dir) (service-events service) (nreverse jobs)))
+            (%log "publishing revision ~d for ~d intro point~:p (~d upload~:p)" rev (length intros)
+                  (reduce #'+ jobs :key (lambda (j) (length (second j)))))
             (setf (service-publishing service) t (service-want-publish service) nil)
             t)
         (error (e)
@@ -480,6 +505,8 @@
         (:intro-up
          (let ((r (find (second msg) (service-intros service) :key #'irec-key)))
            (when r (setf (irec-state r) :live)
+                 (%log "intro point up at ~a (~d live)" (first (irec-relay-plain r))
+                       (service-live-count service))
                  (when (service-published service) (setf (service-want-publish service) t)))))
         (:intro-down
          (let ((r (find (second msg) (service-intros service) :key #'irec-key)))
@@ -492,6 +519,7 @@
                (setf (service-spawn-after service) (+ (get-universal-time) 5)))
              (setf (service-intros service) (remove r (service-intros service))))))
         (:published
+         (%log "descriptor published: ~d HSDir~:p accepted" (second msg))
          (setf (service-publishing service) nil
                (service-accepted service) (second msg)
                (service-last-publish service) (get-universal-time))

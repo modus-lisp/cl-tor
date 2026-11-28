@@ -39,6 +39,8 @@
     (multiple-value-bind (skin state) (n:client-create (dir:relay-ntor-key guard)
                                                        (dir:relay-rsa-id guard))
       (cell:write-cell (%stream circ) 4 circ-id cell:+create2+ (%ntor-create2-payload skin))
+      (when (and *deadline* (not (wait-relay-input circ)))
+        (error "create: timed out waiting for CREATED2"))
       (multiple-value-bind (cid cmd payload) (cell:read-cell (%stream circ) 4)
         (declare (ignore cid))
         (unless (= cmd cell:+created2+)

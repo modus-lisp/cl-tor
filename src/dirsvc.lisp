@@ -248,9 +248,20 @@ thread is the owner (then FN runs as it is, on this thread's own state)."
 
 ;;; ---- circuits, built on the asking thread ---------------------------------------------
 
+(defparameter *circuit-build-timeout* 60
+  "Seconds a circuit build may take when no deadline is set already (CIRC:WITH-DEADLINE).")
+
 (defun build-path-circuit (path)
   "Build a circuit along PATH (guard middle exit relay structs) on this thread; a guard that
-would not connect is reported to the directory."
+would not connect is reported to the directory.  Bounded by the deadline in force, or by
+*CIRCUIT-BUILD-TIMEOUT*: a relay that takes a cell and never answers must not hold a thread
+for ever.  (Live, on modus, .onion dials through the proxy once hung 4 x 600 s; a build
+without a deadline waited for CREATED2 with no bound.)"
+  (if circ:*deadline*
+      (%build-path-circuit path)
+      (circ:with-deadline (*circuit-build-timeout*) (%build-path-circuit path))))
+
+(defun %build-path-circuit (path)
   (destructuring-bind (g m e) path
     (let ((lk (handler-case (link:connect-link g)
                 (error (err)
